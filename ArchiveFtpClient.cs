@@ -51,7 +51,9 @@ internal sealed class ArchiveFtpClient
         string[] candidates =
         [
             "/public_html/viewer/media",
-            "/viewer/media"
+            "/viewer/media",
+            "/media",
+            "/"
         ];
 
         foreach (string candidate in candidates)
@@ -60,14 +62,14 @@ internal sealed class ArchiveFtpClient
 
             if (await LooksLikeArchiveRootAsync(candidate, cancellationToken))
             {
-                MediaRoot = candidate;
+                MediaRoot = candidate == "/" ? "/" : candidate.TrimEnd('/');
                 return;
             }
         }
 
         throw new InvalidOperationException(
             "FTP login succeeded, but the Archive Viewer media directory could not be found. " +
-            "Expected either /public_html/viewer/media or /viewer/media in this FTP account.");
+            "The manager looked for public_html/viewer/media, viewer/media, media, and an FTP account rooted directly in the media directory.");
     }
 
     public async Task<IReadOnlyList<ArchiveItem>> ListCategoryAsync(string category, CancellationToken cancellationToken = default)
@@ -272,7 +274,7 @@ internal sealed class ArchiveFtpClient
     private async Task RenameRemoteAsync(string sourceRemotePath, string targetRemotePath, CancellationToken cancellationToken)
     {
         FtpWebRequest request = CreateRequest(sourceRemotePath, WebRequestMethods.Ftp.Rename);
-        request.RenameTo = targetRemotePath;
+        request.RenameTo = targetRemotePath.TrimStart('/');
         using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
     }
 
