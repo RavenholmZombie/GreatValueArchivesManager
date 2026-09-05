@@ -15,6 +15,8 @@ public sealed class ArchiveFtpClient
 {
     private static readonly string[] ImageExtensions = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"];
     private static readonly string[] VideoExtensions = [".mp4", ".webm", ".ogg", ".mov", ".m4v"];
+    private const int MaxDiscoveryDepth = 6;
+    private const int MaxDiscoveryDirectories = 250;
 
     public static readonly IReadOnlyDictionary<string, string> CategoryFolders =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -46,9 +48,11 @@ public sealed class ArchiveFtpClient
 
     public async Task ConnectAndDiscoverAsync(CancellationToken cancellationToken = default)
     {
+        // The successful root listing doubles as the authentication check.
         await ListDirectoryNamesAsync("/", cancellationToken);
 
-        string[] candidates =
+        // Fast-path the layouts we most commonly expect on cPanel/Namecheap.
+        string[] preferredCandidates =
         [
             "/public_html/viewer/media",
             "/viewer/media",
@@ -56,20 +60,151 @@ public sealed class ArchiveFtpClient
             "/"
         ];
 
-        foreach (string candidate in candidates)
+        foreach (string candidate in preferredCandidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
-
             if (await LooksLikeArchiveRootAsync(candidate, cancellationToken))
             {
-                MediaRoot = candidate == "/" ? "/" : candidate.TrimEnd('/');
+                MediaRoot = NormalizeRemoteDirectory(candidate);
                 return;
             }
         }
 
+        // FTP accounts can be jailed into arbitrary subdirectories, so fall back to
+        // walking the visible directory tree rather than guessing more absolute paths.
+        string? discovered = await FindArchiveRootRecursivelyAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(discovered))
+        {
+            MediaRoot = NormalizeRemoteDirectory(discovered);
+            return;
+        }
+
         throw new InvalidOperationException(
-            "FTP login succeeded, but the Archive Viewer media directory could not be found. " +
-            "The manager looked for public_html/viewer/media, viewer/media, media, and an FTP account rooted directly in the media directory.");
+            $"FTP login succeeded, but the Archive Viewer media directory could not be found. " +
+            $"The manager searched up to {MaxDiscoveryDepth} directory levels and {MaxDiscoveryDirectories} directories, " +
+            "looking for the Great Value Archives category-folder signature (Food, Beverages, Non-Food-Items, PADS, Misc, Concepts, etc.).");
+    }
+
+    private async Task<string?> FindArchiveRootRecursivelyAsync(CancellationToken cancellationToken)
+    {
+        Queue<(string Path, int Depth)> pending = new();
+        HashSet<string> visited = new(StringComparer.OrdinalIgnoreCase);
+        pending.Enqueue(("/", 0));
+
+        int examined = 0;
+
+        while (pending.Count > 0 && examined < MaxDiscoveryDirectories)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            (string path, int depth) = pending.Dequeue();
+            path = NormalizeRemoteDirectory(path);
+
+            if (!visited.Add(path))
+            {
+                continue;
+            }
+
+            examined++;
+
+            IReadOnlyList<string> names;
+            try
+            {
+                names = await ListDirectoryNamesAsync(path, cancellationToken);
+            }
+            catch (WebException ex) when (IsMissingPath(ex) || IsPermissionDenied(ex))
+            {
+                // Some cPanel trees expose entries that this FTP account cannot enter.
+                // Skip those and continue searching accessible directories.
+                continue;
+            }
+
+            if (HasArchiveFolderSignature(names))
+            {
+                return path;
+            }
+
+            if (depth >= MaxDiscoveryDepth)
+            {
+                continue;
+            }
+
+            // Prefer likely web-root names first to find the archive quickly, but still
+            // enqueue every directory we can identify.
+            IEnumerable<string> orderedNames = names
+                .Where(IsPotentialDirectoryName)
+                .OrderByDescending(GetDiscoveryPriority)
+                .ThenBy(n => n, StringComparer.OrdinalIgnoreCase);
+
+            foreach (string name in orderedNames)
+            {
+                string child = CombineRemote(path, name);
+
+                // LIST gives us names but not guaranteed entry types. Probe each child;
+                // directories will list successfully while ordinary files will fail.
+                if (await CanListDirectoryAsync(child, cancellationToken))
+                {
+                    pending.Enqueue((child, depth + 1));
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool HasArchiveFolderSignature(IEnumerable<string> names)
+    {
+        HashSet<string> set = new(names, StringComparer.OrdinalIgnoreCase);
+
+        // Food + Beverages are mandatory and sufficiently distinctive when combined
+        // with at least two of the other real viewer folders.
+        if (!set.Contains("Food") || !set.Contains("Beverages"))
+        {
+            return false;
+        }
+
+        string[] supportingFolders = ["Non-Food-Items", "PADS", "Special", "Misc", "Concepts", "Videos"];
+        return supportingFolders.Count(set.Contains) >= 2;
+    }
+
+    private async Task<bool> CanListDirectoryAsync(string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ListDirectoryNamesAsync(path, cancellationToken);
+            return true;
+        }
+        catch (WebException ex) when (IsMissingPath(ex) || IsPermissionDenied(ex))
+        {
+            return false;
+        }
+    }
+
+    private static bool IsPotentialDirectoryName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name is "." or "..")
+        {
+            return false;
+        }
+
+        // Avoid wasting FTP round-trips probing obvious files.
+        string extension = Path.GetExtension(name);
+        return string.IsNullOrEmpty(extension) || name.StartsWith('.', StringComparison.Ordinal);
+    }
+
+    private static int GetDiscoveryPriority(string name)
+    {
+        return name.ToLowerInvariant() switch
+        {
+            "public_html" => 100,
+            "www" => 95,
+            "gvarchive.com" => 90,
+            "viewer" => 85,
+            "media" => 80,
+            "htdocs" => 75,
+            "httpdocs" => 70,
+            _ => 0
+        };
     }
 
     public async Task<IReadOnlyList<ArchiveItem>> ListCategoryAsync(string category, CancellationToken cancellationToken = default)
@@ -216,10 +351,9 @@ public sealed class ArchiveFtpClient
         try
         {
             IReadOnlyList<string> names = await ListDirectoryNamesAsync(path, cancellationToken);
-            HashSet<string> set = new(names, StringComparer.OrdinalIgnoreCase);
-            return set.Contains("Food") && set.Contains("Beverages");
+            return HasArchiveFolderSignature(names);
         }
-        catch (WebException ex) when (IsMissingPath(ex))
+        catch (WebException ex) when (IsMissingPath(ex) || IsPermissionDenied(ex))
         {
             return false;
         }
@@ -232,7 +366,7 @@ public sealed class ArchiveFtpClient
             await ListDirectoryNamesAsync(path, cancellationToken);
             return true;
         }
-        catch (WebException ex) when (IsMissingPath(ex))
+        catch (WebException ex) when (IsMissingPath(ex) || IsPermissionDenied(ex))
         {
             return false;
         }
@@ -353,6 +487,16 @@ public sealed class ArchiveFtpClient
         return slash <= 0 ? "/" : normalized[..slash];
     }
 
+    private static string NormalizeRemoteDirectory(string path)
+    {
+        string normalized = path.Replace('\\', '/').Trim();
+        if (string.IsNullOrEmpty(normalized) || normalized == "/")
+        {
+            return "/";
+        }
+        return "/" + normalized.Trim('/');
+    }
+
     private static string CombineRemote(params string[] parts) =>
         "/" + string.Join('/', parts.SelectMany(p => p.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries)));
 
@@ -366,6 +510,11 @@ public sealed class ArchiveFtpClient
 
     private static bool IsMissingPath(WebException ex) =>
         ex.Response is FtpWebResponse ftp && ftp.StatusCode == FtpStatusCode.ActionNotTakenFileUnavailable;
+
+    private static bool IsPermissionDenied(WebException ex) =>
+        ex.Response is FtpWebResponse ftp &&
+        (ftp.StatusCode == FtpStatusCode.ActionNotTakenFileUnavailable ||
+         ftp.StatusCode == FtpStatusCode.ActionNotTakenFilenameNotAllowed);
 
     private static string NormalizeHost(string host)
     {
