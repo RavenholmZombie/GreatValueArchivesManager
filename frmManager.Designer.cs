@@ -344,7 +344,6 @@
             button.Size = new Size(208, 32);
             button.TabIndex = top;
             button.Text = text;
-            button.TextAlign = ContentAlignment.MiddleLeft;
         }
 
         private static void ConfigureActionButton(ReaLTaiizor.Controls.CrownButton button, string text, int left)
