@@ -2,15 +2,8 @@
 {
     partial class frmLogin
     {
-        /// <summary>
-        /// Required designer variable.
-        /// </summary>
         private System.ComponentModel.IContainer components = null;
 
-        /// <summary>
-        /// Clean up any resources being used.
-        /// </summary>
-        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
         protected override void Dispose(bool disposing)
         {
             if (disposing && (components != null))
@@ -22,20 +15,20 @@
 
         #region Windows Form Designer generated code
 
-        /// <summary>
-        /// Required method for Designer support - do not modify
-        /// the contents of this method with the code editor.
-        /// </summary>
         private void InitializeComponent()
         {
             System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(frmLogin));
             panel1 = new Panel();
             pictureBox1 = new PictureBox();
+            txtBoxHost = new ReaLTaiizor.Controls.CrownTextBox();
             txtBoxUser = new ReaLTaiizor.Controls.CrownTextBox();
-            label1 = new Label();
             txtBoxPass = new ReaLTaiizor.Controls.CrownTextBox();
-            label2 = new Label();
-            label3 = new Label();
+            lblIntro = new Label();
+            lblHost = new Label();
+            lblUser = new Label();
+            lblPass = new Label();
+            chkUseTls = new CheckBox();
+            lblStatus = new Label();
             btnLogin = new ReaLTaiizor.Controls.CrownButton();
             btnCPanel = new ReaLTaiizor.Controls.CrownButton();
             panel1.SuspendLayout();
@@ -52,7 +45,7 @@
             panel1.Location = new Point(0, 0);
             panel1.Name = "panel1";
             panel1.Size = new Size(433, 100);
-            panel1.TabIndex = 1;
+            panel1.TabIndex = 0;
             // 
             // pictureBox1
             // 
@@ -66,70 +59,113 @@
             pictureBox1.TabIndex = 0;
             pictureBox1.TabStop = false;
             // 
+            // txtBoxHost
+            // 
+            txtBoxHost.BackColor = Color.FromArgb(45, 45, 48);
+            txtBoxHost.BorderStyle = BorderStyle.FixedSingle;
+            txtBoxHost.ForeColor = Color.FromArgb(220, 220, 220);
+            txtBoxHost.Location = new Point(69, 174);
+            txtBoxHost.Name = "txtBoxHost";
+            txtBoxHost.Size = new Size(295, 23);
+            txtBoxHost.TabIndex = 1;
+            txtBoxHost.Text = "gvarchive.com";
+            // 
             // txtBoxUser
             // 
-            txtBoxUser.BackColor = Color.FromArgb(69, 73, 74);
+            txtBoxUser.BackColor = Color.FromArgb(45, 45, 48);
             txtBoxUser.BorderStyle = BorderStyle.FixedSingle;
             txtBoxUser.ForeColor = Color.FromArgb(220, 220, 220);
-            txtBoxUser.Location = new Point(69, 174);
+            txtBoxUser.Location = new Point(69, 229);
             txtBoxUser.Name = "txtBoxUser";
             txtBoxUser.Size = new Size(295, 23);
             txtBoxUser.TabIndex = 2;
             // 
-            // label1
-            // 
-            label1.AutoSize = true;
-            label1.Location = new Point(89, 122);
-            label1.Name = "label1";
-            label1.Size = new Size(254, 15);
-            label1.TabIndex = 3;
-            label1.Text = "Login to the Great Value Archives FTP to begin.";
-            // 
             // txtBoxPass
             // 
-            txtBoxPass.BackColor = Color.FromArgb(69, 73, 74);
+            txtBoxPass.BackColor = Color.FromArgb(45, 45, 48);
             txtBoxPass.BorderStyle = BorderStyle.FixedSingle;
             txtBoxPass.ForeColor = Color.FromArgb(220, 220, 220);
-            txtBoxPass.Location = new Point(69, 229);
+            txtBoxPass.Location = new Point(69, 284);
             txtBoxPass.Name = "txtBoxPass";
             txtBoxPass.Size = new Size(295, 23);
-            txtBoxPass.TabIndex = 4;
+            txtBoxPass.TabIndex = 3;
             txtBoxPass.UseSystemPasswordChar = true;
             // 
-            // label2
+            // lblIntro
             // 
-            label2.AutoSize = true;
-            label2.Location = new Point(69, 156);
-            label2.Name = "label2";
-            label2.Size = new Size(86, 15);
-            label2.TabIndex = 5;
-            label2.Text = "FTP Username:";
+            lblIntro.AutoSize = true;
+            lblIntro.Location = new Point(75, 121);
+            lblIntro.Name = "lblIntro";
+            lblIntro.Size = new Size(283, 15);
+            lblIntro.TabIndex = 10;
+            lblIntro.Text = "Connect to the Great Value Archives FTP to begin.";
             // 
-            // label3
+            // lblHost
             // 
-            label3.AutoSize = true;
-            label3.Location = new Point(69, 211);
-            label3.Name = "label3";
-            label3.Size = new Size(83, 15);
-            label3.TabIndex = 6;
-            label3.Text = "FTP Password:";
+            lblHost.AutoSize = true;
+            lblHost.Location = new Point(69, 156);
+            lblHost.Name = "lblHost";
+            lblHost.Size = new Size(58, 15);
+            lblHost.TabIndex = 11;
+            lblHost.Text = "FTP Host:";
+            // 
+            // lblUser
+            // 
+            lblUser.AutoSize = true;
+            lblUser.Location = new Point(69, 211);
+            lblUser.Name = "lblUser";
+            lblUser.Size = new Size(86, 15);
+            lblUser.TabIndex = 12;
+            lblUser.Text = "FTP Username:";
+            // 
+            // lblPass
+            // 
+            lblPass.AutoSize = true;
+            lblPass.Location = new Point(69, 266);
+            lblPass.Name = "lblPass";
+            lblPass.Size = new Size(83, 15);
+            lblPass.TabIndex = 13;
+            lblPass.Text = "FTP Password:";
+            // 
+            // chkUseTls
+            // 
+            chkUseTls.AutoSize = true;
+            chkUseTls.Checked = true;
+            chkUseTls.CheckState = CheckState.Checked;
+            chkUseTls.Location = new Point(69, 318);
+            chkUseTls.Name = "chkUseTls";
+            chkUseTls.Size = new Size(188, 19);
+            chkUseTls.TabIndex = 4;
+            chkUseTls.Text = "Use FTPS (TLS) when available";
+            chkUseTls.UseVisualStyleBackColor = true;
+            // 
+            // lblStatus
+            // 
+            lblStatus.AutoEllipsis = true;
+            lblStatus.ForeColor = Color.FromArgb(180, 180, 180);
+            lblStatus.Location = new Point(69, 347);
+            lblStatus.Name = "lblStatus";
+            lblStatus.Size = new Size(295, 34);
+            lblStatus.TabIndex = 14;
+            lblStatus.Text = "";
+            lblStatus.TextAlign = ContentAlignment.MiddleLeft;
             // 
             // btnLogin
             // 
-            btnLogin.Location = new Point(272, 277);
+            btnLogin.Location = new Point(272, 394);
             btnLogin.Name = "btnLogin";
             btnLogin.Padding = new Padding(5);
-            btnLogin.Size = new Size(92, 27);
-            btnLogin.TabIndex = 7;
-            btnLogin.Text = "Login";
+            btnLogin.Size = new Size(92, 30);
+            btnLogin.TabIndex = 5;
+            btnLogin.Text = "Connect";
             // 
             // btnCPanel
             // 
-            btnCPanel.Location = new Point(69, 277);
+            btnCPanel.Location = new Point(69, 394);
             btnCPanel.Name = "btnCPanel";
             btnCPanel.Padding = new Padding(5);
-            btnCPanel.Size = new Size(92, 27);
-            btnCPanel.TabIndex = 8;
+            btnCPanel.Size = new Size(92, 30);
+            btnCPanel.TabIndex = 6;
             btnCPanel.Text = "Open CPanel";
             // 
             // frmLogin
@@ -137,14 +173,18 @@
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
             BackColor = Color.FromArgb(62, 62, 66);
-            ClientSize = new Size(433, 340);
+            ClientSize = new Size(433, 452);
             Controls.Add(btnCPanel);
             Controls.Add(btnLogin);
-            Controls.Add(label3);
-            Controls.Add(label2);
+            Controls.Add(lblStatus);
+            Controls.Add(chkUseTls);
+            Controls.Add(lblPass);
+            Controls.Add(lblUser);
+            Controls.Add(lblHost);
+            Controls.Add(lblIntro);
             Controls.Add(txtBoxPass);
-            Controls.Add(label1);
             Controls.Add(txtBoxUser);
+            Controls.Add(txtBoxHost);
             Controls.Add(panel1);
             ForeColor = Color.White;
             FormBorderStyle = FormBorderStyle.FixedSingle;
@@ -153,7 +193,7 @@
             MinimizeBox = false;
             Name = "frmLogin";
             StartPosition = FormStartPosition.CenterScreen;
-            Text = "Login";
+            Text = "Connect to Great Value Archives";
             panel1.ResumeLayout(false);
             ((System.ComponentModel.ISupportInitialize)pictureBox1).EndInit();
             ResumeLayout(false);
@@ -161,13 +201,18 @@
         }
 
         #endregion
+
         private Panel panel1;
         private PictureBox pictureBox1;
+        private ReaLTaiizor.Controls.CrownTextBox txtBoxHost;
         private ReaLTaiizor.Controls.CrownTextBox txtBoxUser;
-        private Label label1;
         private ReaLTaiizor.Controls.CrownTextBox txtBoxPass;
-        private Label label2;
-        private Label label3;
+        private Label lblIntro;
+        private Label lblHost;
+        private Label lblUser;
+        private Label lblPass;
+        private CheckBox chkUseTls;
+        private Label lblStatus;
         private ReaLTaiizor.Controls.CrownButton btnLogin;
         private ReaLTaiizor.Controls.CrownButton btnCPanel;
     }
