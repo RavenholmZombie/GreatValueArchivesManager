@@ -1,5 +1,5 @@
-using System.Net;
-using System.Text;
+using FluentFTP;
+using System.Security.Authentication;
 
 namespace GreatValueArchivesManager;
 
@@ -11,7 +11,7 @@ public sealed record ArchiveItem(
     bool IsVideo,
     string? PublicUrl);
 
-public sealed class ArchiveFtpClient
+public sealed class ArchiveFtpClient : IAsyncDisposable
 {
     private static readonly string[] ImageExtensions = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"];
     private static readonly string[] VideoExtensions = [".mp4", ".webm", ".ogg", ".mov", ".m4v"];
@@ -31,14 +31,24 @@ public sealed class ArchiveFtpClient
             ["Videos"] = "Videos"
         };
 
-    private readonly NetworkCredential _credentials;
+    private readonly AsyncFtpClient _client;
 
     public ArchiveFtpClient(string host, string username, string password, bool useTls, int port = 21)
     {
         Host = NormalizeHost(host);
         Port = port;
         UseTls = useTls;
-        _credentials = new NetworkCredential(username, password);
+
+        _client = new AsyncFtpClient(Host, username, password, port);
+        _client.Config.EncryptionMode = useTls ? FtpEncryptionMode.Explicit : FtpEncryptionMode.None;
+        _client.Config.DataConnectionEncryption = useTls;
+        _client.Config.DataConnectionType = FtpDataConnectionType.AutoPassive;
+        _client.Config.SslProtocols = SslProtocols.None;
+        _client.Config.ConnectTimeout = 15000;
+        _client.Config.ReadTimeout = 30000;
+        _client.Config.DataConnectionConnectTimeout = 15000;
+        _client.Config.DataConnectionReadTimeout = 30000;
+        _client.Config.RetryAttempts = 2;
     }
 
     public string Host { get; }
@@ -48,7 +58,7 @@ public sealed class ArchiveFtpClient
 
     public async Task ConnectAndDiscoverAsync(CancellationToken cancellationToken = default)
     {
-        await ListDirectoryNamesAsync("/", cancellationToken);
+        await _client.Connect(cancellationToken);
 
         string[] preferredCandidates =
         [
@@ -103,17 +113,17 @@ public sealed class ArchiveFtpClient
 
             examined++;
 
-            IReadOnlyList<string> names;
+            FtpListItem[] listing;
             try
             {
-                names = await ListDirectoryNamesAsync(path, cancellationToken);
+                listing = await _client.GetListing(path, cancellationToken);
             }
-            catch (WebException ex) when (IsMissingPath(ex) || IsPermissionDenied(ex))
+            catch (FtpException)
             {
                 continue;
             }
 
-            if (HasArchiveFolderSignature(names))
+            if (HasArchiveFolderSignature(listing.Select(item => item.Name)))
             {
                 return path;
             }
@@ -123,15 +133,16 @@ public sealed class ArchiveFtpClient
                 continue;
             }
 
-            IEnumerable<string> orderedNames = names
-                .Where(IsPotentialDirectoryName)
-                .OrderByDescending(GetDiscoveryPriority)
-                .ThenBy(n => n, StringComparer.OrdinalIgnoreCase);
+            IEnumerable<FtpListItem> directories = listing
+                .Where(item => item.Type == FtpObjectType.Directory)
+                .Where(item => item.Name is not "." and not "..")
+                .OrderByDescending(item => GetDiscoveryPriority(item.Name))
+                .ThenBy(item => item.Name, StringComparer.OrdinalIgnoreCase);
 
-            foreach (string name in orderedNames)
+            foreach (FtpListItem directory in directories)
             {
-                string child = CombineRemote(path, name);
-                if (await CanListDirectoryAsync(child, cancellationToken))
+                string child = NormalizeRemoteDirectory(directory.FullName);
+                if (!visited.Contains(child))
                 {
                     pending.Enqueue((child, depth + 1));
                 }
@@ -152,30 +163,6 @@ public sealed class ArchiveFtpClient
 
         string[] supportingFolders = ["Non-Food-Items", "PADS", "Special", "Misc", "Concepts", "Videos"];
         return supportingFolders.Count(set.Contains) >= 2;
-    }
-
-    private async Task<bool> CanListDirectoryAsync(string path, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await ListDirectoryNamesAsync(path, cancellationToken);
-            return true;
-        }
-        catch (WebException ex) when (IsMissingPath(ex) || IsPermissionDenied(ex))
-        {
-            return false;
-        }
-    }
-
-    private static bool IsPotentialDirectoryName(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name) || name is "." or "..")
-        {
-            return false;
-        }
-
-        string extension = Path.GetExtension(name);
-        return string.IsNullOrEmpty(extension) || name.StartsWith(".", StringComparison.Ordinal);
     }
 
     private static int GetDiscoveryPriority(string name)
@@ -210,7 +197,7 @@ public sealed class ArchiveFtpClient
         if (category.Equals("Trash", StringComparison.OrdinalIgnoreCase))
         {
             string trashPath = CombineRemote(MediaRoot!, ".Trash");
-            if (!await DirectoryExistsAsync(trashPath, cancellationToken))
+            if (!await _client.DirectoryExists(trashPath, cancellationToken))
             {
                 return [];
             }
@@ -234,16 +221,19 @@ public sealed class ArchiveFtpClient
         string remotePath = CombineRemote(MediaRoot!, folderName, Path.GetFileName(localFilePath));
         await EnsureTargetDoesNotExistAsync(remotePath, cancellationToken);
 
-        await using FileStream input = File.OpenRead(localFilePath);
-        FtpWebRequest request = CreateRequest(remotePath, WebRequestMethods.Ftp.UploadFile);
-        request.ContentLength = input.Length;
+        FtpStatus status = await _client.UploadFile(
+            localFilePath,
+            remotePath,
+            FtpRemoteExists.Skip,
+            createRemoteDir: true,
+            verifyOptions: FtpVerify.None,
+            progress: null,
+            token: cancellationToken);
 
-        await using Stream output = await request.GetRequestStreamAsync().WaitAsync(cancellationToken);
-        await input.CopyToAsync(output, cancellationToken);
-        await output.FlushAsync(cancellationToken);
-        output.Close();
-
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
+        if (status != FtpStatus.Success)
+        {
+            throw new IOException($"The FTP server did not upload '{Path.GetFileName(localFilePath)}'. Status: {status}.");
+        }
     }
 
     public async Task RenameAsync(ArchiveItem item, string newFileName, CancellationToken cancellationToken = default)
@@ -252,7 +242,12 @@ public sealed class ArchiveFtpClient
         ValidateFileName(newFileName);
         string target = CombineRemote(GetRemoteDirectory(item.RemotePath), newFileName);
         await EnsureTargetDoesNotExistAsync(target, cancellationToken);
-        await RenameRemoteAsync(item.RemotePath, target, cancellationToken);
+
+        bool moved = await _client.MoveFile(item.RemotePath, target, FtpRemoteExists.Skip, cancellationToken);
+        if (!moved)
+        {
+            throw new IOException($"Could not rename '{item.FileName}'.");
+        }
     }
 
     public async Task MoveAsync(ArchiveItem item, string targetCategory, CancellationToken cancellationToken = default)
@@ -261,40 +256,43 @@ public sealed class ArchiveFtpClient
         string folderName = GetFolderName(targetCategory);
         string target = CombineRemote(MediaRoot!, folderName, item.FileName);
         await EnsureTargetDoesNotExistAsync(target, cancellationToken);
-        await RenameRemoteAsync(item.RemotePath, target, cancellationToken);
+
+        bool moved = await _client.MoveFile(item.RemotePath, target, FtpRemoteExists.Skip, cancellationToken);
+        if (!moved)
+        {
+            throw new IOException($"Could not move '{item.FileName}' to {targetCategory}.");
+        }
     }
 
     public async Task MoveToTrashAsync(ArchiveItem item, CancellationToken cancellationToken = default)
     {
         EnsureReady();
         string trashPath = CombineRemote(MediaRoot!, ".Trash");
-        await EnsureDirectoryAsync(trashPath, cancellationToken);
+        await _client.CreateDirectory(trashPath, true, cancellationToken);
 
         string candidate = CombineRemote(trashPath, item.FileName);
-        if (await FileExistsAsync(candidate, cancellationToken))
+        if (await _client.FileExists(candidate, cancellationToken))
         {
             string stem = Path.GetFileNameWithoutExtension(item.FileName);
             string extension = Path.GetExtension(item.FileName);
             candidate = CombineRemote(trashPath, $"{stem}_{DateTime.Now:yyyyMMdd_HHmmss}{extension}");
         }
 
-        await RenameRemoteAsync(item.RemotePath, candidate, cancellationToken);
+        bool moved = await _client.MoveFile(item.RemotePath, candidate, FtpRemoteExists.Skip, cancellationToken);
+        if (!moved)
+        {
+            throw new IOException($"Could not move '{item.FileName}' to Trash.");
+        }
     }
 
     public async Task PermanentlyDeleteAsync(ArchiveItem item, CancellationToken cancellationToken = default)
     {
-        FtpWebRequest request = CreateRequest(item.RemotePath, WebRequestMethods.Ftp.DeleteFile);
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
+        await _client.DeleteFile(item.RemotePath, cancellationToken);
     }
 
     public async Task<byte[]> DownloadFileAsync(string remotePath, CancellationToken cancellationToken = default)
     {
-        FtpWebRequest request = CreateRequest(remotePath, WebRequestMethods.Ftp.DownloadFile);
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
-        await using Stream responseStream = response.GetResponseStream();
-        using MemoryStream ms = new();
-        await responseStream.CopyToAsync(ms, cancellationToken);
-        return ms.ToArray();
+        return await _client.DownloadBytes(remotePath, cancellationToken);
     }
 
     private async Task<IReadOnlyList<ArchiveItem>> ListItemsFromFolderAsync(
@@ -303,11 +301,12 @@ public sealed class ArchiveFtpClient
         string folderPath,
         CancellationToken cancellationToken)
     {
-        IReadOnlyList<string> names = await ListDirectoryNamesAsync(folderPath, cancellationToken);
+        FtpListItem[] listing = await _client.GetListing(folderPath, cancellationToken);
         List<ArchiveItem> items = [];
 
-        foreach (string name in names)
+        foreach (FtpListItem ftpItem in listing.Where(item => item.Type == FtpObjectType.File))
         {
+            string name = ftpItem.Name;
             string extension = Path.GetExtension(name).ToLowerInvariant();
             bool isImage = ImageExtensions.Contains(extension);
             bool isVideo = VideoExtensions.Contains(extension);
@@ -324,7 +323,7 @@ public sealed class ArchiveFtpClient
                 name,
                 category,
                 folderName,
-                CombineRemote(folderPath, name),
+                NormalizeRemoteFilePath(ftpItem.FullName),
                 isVideo,
                 publicUrl));
         }
@@ -336,113 +335,22 @@ public sealed class ArchiveFtpClient
     {
         try
         {
-            IReadOnlyList<string> names = await ListDirectoryNamesAsync(path, cancellationToken);
-            return HasArchiveFolderSignature(names);
+            FtpListItem[] listing = await _client.GetListing(path, cancellationToken);
+            return HasArchiveFolderSignature(listing.Select(item => item.Name));
         }
-        catch (WebException ex) when (IsMissingPath(ex) || IsPermissionDenied(ex))
+        catch (FtpException)
         {
             return false;
         }
-    }
-
-    private async Task<bool> DirectoryExistsAsync(string path, CancellationToken cancellationToken)
-    {
-        try
-        {
-            await ListDirectoryNamesAsync(path, cancellationToken);
-            return true;
-        }
-        catch (WebException ex) when (IsMissingPath(ex) || IsPermissionDenied(ex))
-        {
-            return false;
-        }
-    }
-
-    private async Task EnsureDirectoryAsync(string path, CancellationToken cancellationToken)
-    {
-        if (await DirectoryExistsAsync(path, cancellationToken))
-        {
-            return;
-        }
-
-        FtpWebRequest request = CreateRequest(path, WebRequestMethods.Ftp.MakeDirectory);
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
     }
 
     private async Task EnsureTargetDoesNotExistAsync(string remotePath, CancellationToken cancellationToken)
     {
-        if (await FileExistsAsync(remotePath, cancellationToken))
+        if (await _client.FileExists(remotePath, cancellationToken))
         {
             throw new IOException($"A file named '{Path.GetFileName(remotePath)}' already exists in the destination.");
         }
     }
-
-    private async Task<bool> FileExistsAsync(string remotePath, CancellationToken cancellationToken)
-    {
-        try
-        {
-            FtpWebRequest request = CreateRequest(remotePath, WebRequestMethods.Ftp.GetFileSize);
-            using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
-            return true;
-        }
-        catch (WebException ex) when (IsMissingPath(ex))
-        {
-            return false;
-        }
-    }
-
-    private async Task RenameRemoteAsync(string sourceRemotePath, string targetRemotePath, CancellationToken cancellationToken)
-    {
-        FtpWebRequest request = CreateRequest(sourceRemotePath, WebRequestMethods.Ftp.Rename);
-        request.RenameTo = targetRemotePath.TrimStart('/');
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
-    }
-
-    private async Task<IReadOnlyList<string>> ListDirectoryNamesAsync(string remotePath, CancellationToken cancellationToken)
-    {
-        FtpWebRequest request = CreateRequest(remotePath, WebRequestMethods.Ftp.ListDirectory);
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
-        await using Stream stream = response.GetResponseStream();
-        using StreamReader reader = new(stream, Encoding.UTF8);
-
-        List<string> names = [];
-        while (!reader.EndOfStream)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            string? line = await reader.ReadLineAsync().WaitAsync(cancellationToken);
-            if (!string.IsNullOrWhiteSpace(line) && line is not "." and not "..")
-            {
-                names.Add(line.Trim());
-            }
-        }
-        return names;
-    }
-
-#pragma warning disable SYSLIB0014
-    private FtpWebRequest CreateRequest(string remotePath, string method)
-    {
-        FtpWebRequest request = (FtpWebRequest)WebRequest.Create(BuildUri(remotePath));
-        request.Method = method;
-        request.Credentials = _credentials;
-        request.EnableSsl = UseTls;
-        request.UseBinary = true;
-        request.UsePassive = true;
-        request.KeepAlive = false;
-        request.Timeout = 20000;
-        request.ReadWriteTimeout = 30000;
-        return request;
-    }
-#pragma warning restore SYSLIB0014
-
-    private Uri BuildUri(string remotePath)
-    {
-        string path = remotePath.Replace('\\', '/').Trim('/');
-        string escaped = string.Join('/', path.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.EscapeDataString));
-        return new Uri($"ftp://{Host}:{Port}/{escaped}");
-    }
-
-    private static string BuildPublicUrl(string folderName, string fileName) =>
-        $"https://gvarchive.com/viewer/media/{Uri.EscapeDataString(folderName)}/{Uri.EscapeDataString(fileName)}";
 
     private string GetFolderName(string category)
     {
@@ -460,7 +368,7 @@ public sealed class ArchiveFtpClient
 
     private void EnsureReady()
     {
-        if (string.IsNullOrWhiteSpace(MediaRoot))
+        if (!_client.IsConnected || string.IsNullOrWhiteSpace(MediaRoot))
         {
             throw new InvalidOperationException("The FTP client has not connected to the archive yet.");
         }
@@ -478,9 +386,16 @@ public sealed class ArchiveFtpClient
 
     private static string NormalizeRemoteDirectory(string path)
     {
-        string normalized = CombineRemote(path);
-        return normalized == "/" ? "/" : normalized.TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(path) || path == "/")
+        {
+            return "/";
+        }
+
+        return "/" + string.Join('/', path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries));
     }
+
+    private static string NormalizeRemoteFilePath(string path) =>
+        "/" + string.Join('/', path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries));
 
     private static void ValidateFileName(string fileName)
     {
@@ -490,11 +405,8 @@ public sealed class ArchiveFtpClient
         }
     }
 
-    private static bool IsMissingPath(WebException ex) =>
-        ex.Response is FtpWebResponse ftp && ftp.StatusCode == FtpStatusCode.ActionNotTakenFileUnavailable;
-
-    private static bool IsPermissionDenied(WebException ex) =>
-        ex.Response is FtpWebResponse ftp && ftp.StatusCode == FtpStatusCode.ActionNotTakenFilenameNotAllowed;
+    private static string BuildPublicUrl(string folderName, string fileName) =>
+        $"https://gvarchive.com/viewer/media/{Uri.EscapeDataString(folderName)}/{Uri.EscapeDataString(fileName)}";
 
     private static string NormalizeHost(string host)
     {
@@ -504,5 +416,14 @@ public sealed class ArchiveFtpClient
             value = uri.Host;
         }
         return value.Trim('/');
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_client.IsConnected)
+        {
+            await _client.Disconnect();
+        }
+        await _client.DisposeAsync();
     }
 }
