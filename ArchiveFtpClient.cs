@@ -3,7 +3,7 @@ using System.Text;
 
 namespace GreatValueArchivesManager;
 
-internal sealed record ArchiveItem(
+public sealed record ArchiveItem(
     string FileName,
     string Category,
     string FolderName,
@@ -11,7 +11,7 @@ internal sealed record ArchiveItem(
     bool IsVideo,
     string? PublicUrl);
 
-internal sealed class ArchiveFtpClient
+public sealed class ArchiveFtpClient
 {
     private static readonly string[] ImageExtensions = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"];
     private static readonly string[] VideoExtensions = [".mp4", ".webm", ".ogg", ".mov", ".m4v"];
