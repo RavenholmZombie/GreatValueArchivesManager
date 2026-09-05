@@ -68,7 +68,7 @@ namespace GreatValueArchivesManager
             {
                 MessageBox.Show(
                     this,
-                    BuildFtpErrorMessage(ex),
+                    BuildFtpErrorMessage(ex, host, chkUseTls.Checked),
                     "FTP Connection Failed",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
@@ -78,7 +78,7 @@ namespace GreatValueArchivesManager
             {
                 MessageBox.Show(
                     this,
-                    ex.Message,
+                    BuildConnectionErrorMessage(ex, host, chkUseTls.Checked),
                     "Connection Failed",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
@@ -106,8 +106,13 @@ namespace GreatValueArchivesManager
             }
         }
 
-        private static string BuildFtpErrorMessage(WebException ex)
+        private static string BuildFtpErrorMessage(WebException ex, string host, bool useTls)
         {
+            if (useTls && IsCertificateNameMismatch(ex))
+            {
+                return BuildCertificateNameMismatchMessage(host);
+            }
+
             if (ex.Response is FtpWebResponse ftp)
             {
                 return $"The FTP server returned {ftp.StatusCode}: {ftp.StatusDescription.Trim()}";
@@ -115,6 +120,39 @@ namespace GreatValueArchivesManager
 
             return ex.Message;
         }
+
+        private static string BuildConnectionErrorMessage(Exception ex, string host, bool useTls)
+        {
+            if (useTls && IsCertificateNameMismatch(ex))
+            {
+                return BuildCertificateNameMismatchMessage(host);
+            }
+
+            return ex.Message;
+        }
+
+        private static bool IsCertificateNameMismatch(Exception ex)
+        {
+            for (Exception? current = ex; current is not null; current = current.InnerException)
+            {
+                if (current.Message.Contains("RemoteCertificateNameMismatch", StringComparison.OrdinalIgnoreCase) ||
+                    current.Message.Contains("certificate name mismatch", StringComparison.OrdinalIgnoreCase) ||
+                    current.Message.Contains("remote certificate is invalid", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static string BuildCertificateNameMismatchMessage(string host) =>
+            $"The FTP server answered, but its TLS certificate does not match '{host}'.\r\n\r\n" +
+            "Namecheap recommends using the hosting server's actual hostname for FTPES/FTPS, " +
+            "such as server123.web-hosting.com, rather than your website domain.\r\n\r\n" +
+            "Open cPanel and look under General Information > Server Information for the Server Name, " +
+            "then enter the full server hostname in the FTP Host box and try again.\r\n\r\n" +
+            "Do not disable TLS just to bypass this warning unless you intentionally want an unencrypted FTP connection.";
 
         private void btnCPanel_Click(object? sender, EventArgs e)
         {
