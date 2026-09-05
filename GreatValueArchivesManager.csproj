@@ -34,9 +34,8 @@
 
   <ItemGroup>
     <PackageReference Include="FluentFTP" Version="54.2.0" />
-    <PackageReference Include="Imazen.WebP" Version="11.0.0" />
-    <PackageReference Include="Imazen.WebP.NativeRuntime.win-x64" Version="11.0.0" />
     <PackageReference Include="ReaLTaiizor" Version="3.8.2.1" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="4.1.1" />
   </ItemGroup>
 
   <ItemGroup>
