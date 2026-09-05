@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Net;
 
 namespace GreatValueArchivesManager
 {
@@ -17,6 +18,8 @@ namespace GreatValueArchivesManager
             BackColor = Color.FromArgb(62, 62, 66);
             ForeColor = Color.WhiteSmoke;
 
+            txtBoxHost.BackColor = Color.FromArgb(45, 45, 48);
+            txtBoxHost.ForeColor = Color.WhiteSmoke;
             txtBoxUser.BackColor = Color.FromArgb(45, 45, 48);
             txtBoxUser.ForeColor = Color.WhiteSmoke;
             txtBoxPass.BackColor = Color.FromArgb(45, 45, 48);
@@ -26,26 +29,91 @@ namespace GreatValueArchivesManager
             btnLogin.ForeColor = Color.White;
             btnCPanel.BackColor = Color.FromArgb(45, 45, 48);
             btnCPanel.ForeColor = Color.WhiteSmoke;
+            chkUseTls.ForeColor = Color.WhiteSmoke;
         }
 
-        private void btnLogin_Click(object? sender, EventArgs e)
+        private async void btnLogin_Click(object? sender, EventArgs e)
         {
-            if (string.IsNullOrWhiteSpace(txtBoxUser.Text) || string.IsNullOrWhiteSpace(txtBoxPass.Text))
+            string host = txtBoxHost.Text.Trim();
+            string username = txtBoxUser.Text.Trim();
+            string password = txtBoxPass.Text;
+
+            if (string.IsNullOrWhiteSpace(host) || string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
             {
                 MessageBox.Show(
                     this,
-                    "Enter your FTP username and password before continuing.",
+                    "Enter the FTP host, username, and password before continuing.",
                     "Login Required",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
                 return;
             }
 
-            // FTP authentication will be wired here. For now this establishes the intended login-first flow.
-            Hide();
-            using frmManager manager = new();
-            manager.ShowDialog(this);
-            Close();
+            SetBusy(true, "Connecting to the archive and locating /viewer/media...");
+            ArchiveFtpClient client = new(host, username, password, chkUseTls.Checked);
+
+            try
+            {
+                await client.ConnectAndDiscoverAsync();
+                lblStatus.Text = $"Connected. Media root: {client.MediaRoot}";
+
+                Hide();
+                using frmManager manager = new(client);
+                manager.ShowDialog(this);
+                Show();
+                txtBoxPass.Clear();
+                lblStatus.Text = "Disconnected.";
+            }
+            catch (WebException ex)
+            {
+                MessageBox.Show(
+                    this,
+                    BuildFtpErrorMessage(ex),
+                    "FTP Connection Failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                lblStatus.Text = "Connection failed.";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    this,
+                    ex.Message,
+                    "Connection Failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                lblStatus.Text = "Connection failed.";
+            }
+            finally
+            {
+                SetBusy(false);
+            }
+        }
+
+        private void SetBusy(bool busy, string? statusText = null)
+        {
+            txtBoxHost.Enabled = !busy;
+            txtBoxUser.Enabled = !busy;
+            txtBoxPass.Enabled = !busy;
+            chkUseTls.Enabled = !busy;
+            btnLogin.Enabled = !busy;
+            btnCPanel.Enabled = !busy;
+            UseWaitCursor = busy;
+
+            if (statusText is not null)
+            {
+                lblStatus.Text = statusText;
+            }
+        }
+
+        private static string BuildFtpErrorMessage(WebException ex)
+        {
+            if (ex.Response is FtpWebResponse ftp)
+            {
+                return $"The FTP server returned {ftp.StatusCode}: {ftp.StatusDescription.Trim()}";
+            }
+
+            return ex.Message;
         }
 
         private void btnCPanel_Click(object? sender, EventArgs e)
