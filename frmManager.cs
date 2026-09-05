@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using WebP.Net;
 
 namespace GreatValueArchivesManager
 {
@@ -272,8 +273,7 @@ namespace GreatValueArchivesManager
                 }
 
                 byte[] bytes = await Http.GetByteArrayAsync(item.PublicUrl, token);
-                using MemoryStream stream = new(bytes);
-                using Image source = Image.FromStream(stream);
+                using Image source = DecodeThumbnailSource(bytes, item.FileName);
                 using Bitmap thumbnail = CreateAspectFitThumbnail(source, _thumbnailImages.ImageSize);
                 _thumbnailImages.Images.Add(key, new Bitmap(thumbnail));
 
@@ -296,6 +296,18 @@ namespace GreatValueArchivesManager
             {
                 _thumbnailGate.Release();
             }
+        }
+
+        private static Image DecodeThumbnailSource(byte[] bytes, string fileName)
+        {
+            if (Path.GetExtension(fileName).Equals(".webp", StringComparison.OrdinalIgnoreCase))
+            {
+                return WebPDecoder.Decode(bytes);
+            }
+
+            using MemoryStream stream = new(bytes);
+            using Image decoded = Image.FromStream(stream);
+            return new Bitmap(decoded);
         }
 
         private async Task UploadAsync()
