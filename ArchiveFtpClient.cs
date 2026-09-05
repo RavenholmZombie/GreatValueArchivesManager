@@ -48,10 +48,8 @@ public sealed class ArchiveFtpClient
 
     public async Task ConnectAndDiscoverAsync(CancellationToken cancellationToken = default)
     {
-        // The successful root listing doubles as the authentication check.
         await ListDirectoryNamesAsync("/", cancellationToken);
 
-        // Fast-path the layouts we most commonly expect on cPanel/Namecheap.
         string[] preferredCandidates =
         [
             "/public_html/viewer/media",
@@ -70,8 +68,6 @@ public sealed class ArchiveFtpClient
             }
         }
 
-        // FTP accounts can be jailed into arbitrary subdirectories, so fall back to
-        // walking the visible directory tree rather than guessing more absolute paths.
         string? discovered = await FindArchiveRootRecursivelyAsync(cancellationToken);
         if (!string.IsNullOrWhiteSpace(discovered))
         {
@@ -114,8 +110,6 @@ public sealed class ArchiveFtpClient
             }
             catch (WebException ex) when (IsMissingPath(ex) || IsPermissionDenied(ex))
             {
-                // Some cPanel trees expose entries that this FTP account cannot enter.
-                // Skip those and continue searching accessible directories.
                 continue;
             }
 
@@ -129,8 +123,6 @@ public sealed class ArchiveFtpClient
                 continue;
             }
 
-            // Prefer likely web-root names first to find the archive quickly, but still
-            // enqueue every directory we can identify.
             IEnumerable<string> orderedNames = names
                 .Where(IsPotentialDirectoryName)
                 .OrderByDescending(GetDiscoveryPriority)
@@ -139,9 +131,6 @@ public sealed class ArchiveFtpClient
             foreach (string name in orderedNames)
             {
                 string child = CombineRemote(path, name);
-
-                // LIST gives us names but not guaranteed entry types. Probe each child;
-                // directories will list successfully while ordinary files will fail.
                 if (await CanListDirectoryAsync(child, cancellationToken))
                 {
                     pending.Enqueue((child, depth + 1));
@@ -156,8 +145,6 @@ public sealed class ArchiveFtpClient
     {
         HashSet<string> set = new(names, StringComparer.OrdinalIgnoreCase);
 
-        // Food + Beverages are mandatory and sufficiently distinctive when combined
-        // with at least two of the other real viewer folders.
         if (!set.Contains("Food") || !set.Contains("Beverages"))
         {
             return false;
@@ -187,9 +174,8 @@ public sealed class ArchiveFtpClient
             return false;
         }
 
-        // Avoid wasting FTP round-trips probing obvious files.
         string extension = Path.GetExtension(name);
-        return string.IsNullOrEmpty(extension) || name.StartsWith('.', StringComparison.Ordinal);
+        return string.IsNullOrEmpty(extension) || name.StartsWith(".", StringComparison.Ordinal);
     }
 
     private static int GetDiscoveryPriority(string name)
@@ -487,18 +473,14 @@ public sealed class ArchiveFtpClient
         return slash <= 0 ? "/" : normalized[..slash];
     }
 
-    private static string NormalizeRemoteDirectory(string path)
-    {
-        string normalized = path.Replace('\\', '/').Trim();
-        if (string.IsNullOrEmpty(normalized) || normalized == "/")
-        {
-            return "/";
-        }
-        return "/" + normalized.Trim('/');
-    }
-
     private static string CombineRemote(params string[] parts) =>
         "/" + string.Join('/', parts.SelectMany(p => p.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries)));
+
+    private static string NormalizeRemoteDirectory(string path)
+    {
+        string normalized = CombineRemote(path);
+        return normalized == "/" ? "/" : normalized.TrimEnd('/');
+    }
 
     private static void ValidateFileName(string fileName)
     {
@@ -512,9 +494,7 @@ public sealed class ArchiveFtpClient
         ex.Response is FtpWebResponse ftp && ftp.StatusCode == FtpStatusCode.ActionNotTakenFileUnavailable;
 
     private static bool IsPermissionDenied(WebException ex) =>
-        ex.Response is FtpWebResponse ftp &&
-        (ftp.StatusCode == FtpStatusCode.ActionNotTakenFileUnavailable ||
-         ftp.StatusCode == FtpStatusCode.ActionNotTakenFilenameNotAllowed);
+        ex.Response is FtpWebResponse ftp && ftp.StatusCode == FtpStatusCode.ActionNotTakenFilenameNotAllowed;
 
     private static string NormalizeHost(string host)
     {
