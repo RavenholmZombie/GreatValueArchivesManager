@@ -45,6 +45,15 @@ namespace GreatValueArchivesManager
             listViewItems.TextChanged += (_, _) => { };
             txtSearch.TextChanged += (_, _) => ApplySearchFilter();
             listViewItems.DoubleClick += async (_, _) => await PreviewSelectedAsync();
+            listViewItems.KeyDown += async (_, e) =>
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                    await PreviewSelectedAsync();
+                }
+            };
         }
 
         private void WireCategoryButtons()
@@ -91,7 +100,7 @@ namespace GreatValueArchivesManager
             editToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Delete", async () => await DeleteSelectedAsync(), Keys.Delete));
 
             viewToolStripMenuItem.DropDownItems.Clear();
-            viewToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Preview selected", async () => await PreviewSelectedAsync(), Keys.Enter));
+            viewToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Preview selected", async () => await PreviewSelectedAsync()));
             viewToolStripMenuItem.DropDownItems.Add(new ToolStripSeparator());
             foreach ((Control button, string category) in _categoryNames)
             {
