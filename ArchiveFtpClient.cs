@@ -118,8 +118,11 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
             {
                 listing = await _client.GetListing(path, cancellationToken);
             }
-            catch (FtpException)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                // An inaccessible or malformed directory should not abort discovery.
+                // FluentFTP exception types have changed between major versions, so
+                // keep this boundary version-agnostic and let cancellation propagate.
                 continue;
             }
 
@@ -219,20 +222,16 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
         EnsureReady();
         string folderName = GetFolderName(category);
         string remotePath = CombineRemote(MediaRoot!, folderName, Path.GetFileName(localFilePath));
-        await EnsureTargetDoesNotExistAsync(remotePath, cancellationToken);
 
-        FtpStatus status = await _client.UploadFile(
-            localFilePath,
-            remotePath,
-            FtpRemoteExists.Skip,
-            createRemoteDir: true,
-            verifyOptions: FtpVerify.None,
-            progress: null,
-            token: cancellationToken);
+        if (await _client.FileExists(remotePath, cancellationToken))
+        {
+            throw new IOException($"A file named '{Path.GetFileName(remotePath)}' already exists in the destination.");
+        }
 
+        FtpStatus status = await _client.UploadFile(localFilePath, remotePath, FtpRemoteExists.Skip, true, FtpVerify.None, null, cancellationToken);
         if (status != FtpStatus.Success)
         {
-            throw new IOException($"The FTP server did not upload '{Path.GetFileName(localFilePath)}'. Status: {status}.");
+            throw new IOException($"FTP upload failed for '{Path.GetFileName(localFilePath)}'.");
         }
     }
 
@@ -241,13 +240,13 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
         EnsureReady();
         ValidateFileName(newFileName);
         string target = CombineRemote(GetRemoteDirectory(item.RemotePath), newFileName);
-        await EnsureTargetDoesNotExistAsync(target, cancellationToken);
 
-        bool moved = await _client.MoveFile(item.RemotePath, target, FtpRemoteExists.Skip, cancellationToken);
-        if (!moved)
+        if (await _client.FileExists(target, cancellationToken))
         {
-            throw new IOException($"Could not rename '{item.FileName}'.");
+            throw new IOException($"A file named '{newFileName}' already exists in the destination.");
         }
+
+        await _client.MoveFile(item.RemotePath, target, FtpRemoteExists.Skip, cancellationToken);
     }
 
     public async Task MoveAsync(ArchiveItem item, string targetCategory, CancellationToken cancellationToken = default)
@@ -255,20 +254,23 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
         EnsureReady();
         string folderName = GetFolderName(targetCategory);
         string target = CombineRemote(MediaRoot!, folderName, item.FileName);
-        await EnsureTargetDoesNotExistAsync(target, cancellationToken);
 
-        bool moved = await _client.MoveFile(item.RemotePath, target, FtpRemoteExists.Skip, cancellationToken);
-        if (!moved)
+        if (await _client.FileExists(target, cancellationToken))
         {
-            throw new IOException($"Could not move '{item.FileName}' to {targetCategory}.");
+            throw new IOException($"A file named '{item.FileName}' already exists in the destination.");
         }
+
+        await _client.MoveFile(item.RemotePath, target, FtpRemoteExists.Skip, cancellationToken);
     }
 
     public async Task MoveToTrashAsync(ArchiveItem item, CancellationToken cancellationToken = default)
     {
         EnsureReady();
         string trashPath = CombineRemote(MediaRoot!, ".Trash");
-        await _client.CreateDirectory(trashPath, true, cancellationToken);
+        if (!await _client.DirectoryExists(trashPath, cancellationToken))
+        {
+            await _client.CreateDirectory(trashPath, true, cancellationToken);
+        }
 
         string candidate = CombineRemote(trashPath, item.FileName);
         if (await _client.FileExists(candidate, cancellationToken))
@@ -278,11 +280,7 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
             candidate = CombineRemote(trashPath, $"{stem}_{DateTime.Now:yyyyMMdd_HHmmss}{extension}");
         }
 
-        bool moved = await _client.MoveFile(item.RemotePath, candidate, FtpRemoteExists.Skip, cancellationToken);
-        if (!moved)
-        {
-            throw new IOException($"Could not move '{item.FileName}' to Trash.");
-        }
+        await _client.MoveFile(item.RemotePath, candidate, FtpRemoteExists.Skip, cancellationToken);
     }
 
     public async Task PermanentlyDeleteAsync(ArchiveItem item, CancellationToken cancellationToken = default)
@@ -292,7 +290,13 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
 
     public async Task<byte[]> DownloadFileAsync(string remotePath, CancellationToken cancellationToken = default)
     {
-        return await _client.DownloadBytes(remotePath, cancellationToken);
+        using MemoryStream ms = new();
+        bool downloaded = await _client.DownloadStream(ms, remotePath, 0, null, cancellationToken);
+        if (!downloaded)
+        {
+            throw new IOException($"FTP download failed for '{Path.GetFileName(remotePath)}'.");
+        }
+        return ms.ToArray();
     }
 
     private async Task<IReadOnlyList<ArchiveItem>> ListItemsFromFolderAsync(
@@ -304,10 +308,9 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
         FtpListItem[] listing = await _client.GetListing(folderPath, cancellationToken);
         List<ArchiveItem> items = [];
 
-        foreach (FtpListItem ftpItem in listing.Where(item => item.Type == FtpObjectType.File))
+        foreach (FtpListItem entry in listing.Where(entry => entry.Type == FtpObjectType.File))
         {
-            string name = ftpItem.Name;
-            string extension = Path.GetExtension(name).ToLowerInvariant();
+            string extension = Path.GetExtension(entry.Name).ToLowerInvariant();
             bool isImage = ImageExtensions.Contains(extension);
             bool isVideo = VideoExtensions.Contains(extension);
             if (!isImage && !isVideo)
@@ -317,13 +320,13 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
 
             string? publicUrl = category.Equals("Trash", StringComparison.OrdinalIgnoreCase)
                 ? null
-                : BuildPublicUrl(folderName, name);
+                : BuildPublicUrl(folderName, entry.Name);
 
             items.Add(new ArchiveItem(
-                name,
+                entry.Name,
                 category,
                 folderName,
-                NormalizeRemoteFilePath(ftpItem.FullName),
+                NormalizeRemoteDirectory(entry.FullName),
                 isVideo,
                 publicUrl));
         }
@@ -335,22 +338,31 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
     {
         try
         {
+            if (!await _client.DirectoryExists(path, cancellationToken))
+            {
+                return false;
+            }
+
             FtpListItem[] listing = await _client.GetListing(path, cancellationToken);
-            return HasArchiveFolderSignature(listing.Select(item => item.Name));
+            return HasArchiveFolderSignature(listing.Where(item => item.Type == FtpObjectType.Directory).Select(item => item.Name));
         }
-        catch (FtpException)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return false;
         }
     }
 
-    private async Task EnsureTargetDoesNotExistAsync(string remotePath, CancellationToken cancellationToken)
+    public async ValueTask DisposeAsync()
     {
-        if (await _client.FileExists(remotePath, cancellationToken))
+        if (_client.IsConnected)
         {
-            throw new IOException($"A file named '{Path.GetFileName(remotePath)}' already exists in the destination.");
+            await _client.Disconnect(CancellationToken.None);
         }
+        _client.Dispose();
     }
+
+    private static string BuildPublicUrl(string folderName, string fileName) =>
+        $"https://gvarchive.com/viewer/media/{Uri.EscapeDataString(folderName)}/{Uri.EscapeDataString(fileName)}";
 
     private string GetFolderName(string category)
     {
@@ -368,7 +380,7 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
 
     private void EnsureReady()
     {
-        if (!_client.IsConnected || string.IsNullOrWhiteSpace(MediaRoot))
+        if (string.IsNullOrWhiteSpace(MediaRoot) || !_client.IsConnected)
         {
             throw new InvalidOperationException("The FTP client has not connected to the archive yet.");
         }
@@ -386,16 +398,9 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
 
     private static string NormalizeRemoteDirectory(string path)
     {
-        if (string.IsNullOrWhiteSpace(path) || path == "/")
-        {
-            return "/";
-        }
-
-        return "/" + string.Join('/', path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries));
+        string normalized = "/" + string.Join('/', path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries));
+        return normalized.Length == 0 ? "/" : normalized;
     }
-
-    private static string NormalizeRemoteFilePath(string path) =>
-        "/" + string.Join('/', path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries));
 
     private static void ValidateFileName(string fileName)
     {
@@ -405,9 +410,6 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
         }
     }
 
-    private static string BuildPublicUrl(string folderName, string fileName) =>
-        $"https://gvarchive.com/viewer/media/{Uri.EscapeDataString(folderName)}/{Uri.EscapeDataString(fileName)}";
-
     private static string NormalizeHost(string host)
     {
         string value = host.Trim();
@@ -416,14 +418,5 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
             value = uri.Host;
         }
         return value.Trim('/');
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        if (_client.IsConnected)
-        {
-            await _client.Disconnect();
-        }
-        await _client.DisposeAsync();
     }
 }
