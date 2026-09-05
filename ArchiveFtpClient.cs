@@ -51,18 +51,16 @@ internal sealed class ArchiveFtpClient
         string[] candidates =
         [
             "/public_html/viewer/media",
-            "/viewer/media",
-            "/public_html/viewer/media/",
-            "/viewer/media/"
+            "/viewer/media"
         ];
 
-        foreach (string candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (string candidate in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             if (await LooksLikeArchiveRootAsync(candidate, cancellationToken))
             {
-                MediaRoot = candidate.TrimEnd('/');
+                MediaRoot = candidate;
                 return;
             }
         }
@@ -111,23 +109,25 @@ internal sealed class ArchiveFtpClient
         EnsureReady();
         string folderName = GetFolderName(category);
         string remotePath = CombineRemote(MediaRoot!, folderName, Path.GetFileName(localFilePath));
+        await EnsureTargetDoesNotExistAsync(remotePath, cancellationToken);
 
         await using FileStream input = File.OpenRead(localFilePath);
         FtpWebRequest request = CreateRequest(remotePath, WebRequestMethods.Ftp.UploadFile);
         request.ContentLength = input.Length;
 
-        await using Stream output = await request.GetRequestStreamAsync(cancellationToken);
+        await using Stream output = await request.GetRequestStreamAsync().WaitAsync(cancellationToken);
         await input.CopyToAsync(output, cancellationToken);
+        await output.FlushAsync(cancellationToken);
         output.Close();
 
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync(cancellationToken);
+        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
     }
 
     public async Task RenameAsync(ArchiveItem item, string newFileName, CancellationToken cancellationToken = default)
     {
         EnsureReady();
         ValidateFileName(newFileName);
-        string target = CombineRemote(Path.GetDirectoryName(item.RemotePath)!.Replace('\\', '/'), newFileName);
+        string target = CombineRemote(GetRemoteDirectory(item.RemotePath), newFileName);
         await EnsureTargetDoesNotExistAsync(target, cancellationToken);
         await RenameRemoteAsync(item.RemotePath, target, cancellationToken);
     }
@@ -161,13 +161,13 @@ internal sealed class ArchiveFtpClient
     public async Task PermanentlyDeleteAsync(ArchiveItem item, CancellationToken cancellationToken = default)
     {
         FtpWebRequest request = CreateRequest(item.RemotePath, WebRequestMethods.Ftp.DeleteFile);
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync(cancellationToken);
+        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
     }
 
     public async Task<byte[]> DownloadFileAsync(string remotePath, CancellationToken cancellationToken = default)
     {
         FtpWebRequest request = CreateRequest(remotePath, WebRequestMethods.Ftp.DownloadFile);
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync(cancellationToken);
+        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
         await using Stream responseStream = response.GetResponseStream();
         using MemoryStream ms = new();
         await responseStream.CopyToAsync(ms, cancellationToken);
@@ -244,7 +244,7 @@ internal sealed class ArchiveFtpClient
         }
 
         FtpWebRequest request = CreateRequest(path, WebRequestMethods.Ftp.MakeDirectory);
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync(cancellationToken);
+        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
     }
 
     private async Task EnsureTargetDoesNotExistAsync(string remotePath, CancellationToken cancellationToken)
@@ -260,7 +260,7 @@ internal sealed class ArchiveFtpClient
         try
         {
             FtpWebRequest request = CreateRequest(remotePath, WebRequestMethods.Ftp.GetFileSize);
-            using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync(cancellationToken);
+            using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
             return true;
         }
         catch (WebException ex) when (IsMissingPath(ex))
@@ -273,13 +273,13 @@ internal sealed class ArchiveFtpClient
     {
         FtpWebRequest request = CreateRequest(sourceRemotePath, WebRequestMethods.Ftp.Rename);
         request.RenameTo = targetRemotePath;
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync(cancellationToken);
+        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
     }
 
     private async Task<IReadOnlyList<string>> ListDirectoryNamesAsync(string remotePath, CancellationToken cancellationToken)
     {
         FtpWebRequest request = CreateRequest(remotePath, WebRequestMethods.Ftp.ListDirectory);
-        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync(cancellationToken);
+        using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync().WaitAsync(cancellationToken);
         await using Stream stream = response.GetResponseStream();
         using StreamReader reader = new(stream, Encoding.UTF8);
 
@@ -287,7 +287,7 @@ internal sealed class ArchiveFtpClient
         while (!reader.EndOfStream)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            string? line = await reader.ReadLineAsync(cancellationToken);
+            string? line = await reader.ReadLineAsync().WaitAsync(cancellationToken);
             if (!string.IsNullOrWhiteSpace(line) && line is not "." and not "..")
             {
                 names.Add(line.Trim());
@@ -344,6 +344,13 @@ internal sealed class ArchiveFtpClient
         }
     }
 
+    private static string GetRemoteDirectory(string remotePath)
+    {
+        string normalized = remotePath.Replace('\\', '/');
+        int slash = normalized.LastIndexOf('/');
+        return slash <= 0 ? "/" : normalized[..slash];
+    }
+
     private static string CombineRemote(params string[] parts) =>
         "/" + string.Join('/', parts.SelectMany(p => p.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries)));
 
@@ -361,7 +368,7 @@ internal sealed class ArchiveFtpClient
     private static string NormalizeHost(string host)
     {
         string value = host.Trim();
-        if (Uri.TryCreate(value, UriKind.Absolute, out Uri? uri))
+        if (Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) && !string.IsNullOrWhiteSpace(uri.Host))
         {
             value = uri.Host;
         }
