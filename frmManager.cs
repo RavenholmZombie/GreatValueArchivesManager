@@ -274,7 +274,7 @@ namespace GreatValueArchivesManager
                 byte[] bytes = await Http.GetByteArrayAsync(item.PublicUrl, token);
                 using MemoryStream stream = new(bytes);
                 using Image source = Image.FromStream(stream);
-                using Bitmap thumbnail = new(source);
+                using Bitmap thumbnail = CreateAspectFitThumbnail(source, _thumbnailImages.ImageSize);
                 _thumbnailImages.Images.Add(key, new Bitmap(thumbnail));
 
                 foreach (ListViewItem visibleItem in listViewItems.Items)
@@ -535,6 +535,29 @@ namespace GreatValueArchivesManager
 
         private void ShowOperationError(string heading, Exception ex) =>
             MessageBox.Show(this, $"{heading}\n\n{ex.Message}", "Great Value Archives Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+        private static Bitmap CreateAspectFitThumbnail(Image source, Size targetSize)
+        {
+            Bitmap bitmap = new(targetSize.Width, targetSize.Height);
+            using Graphics graphics = Graphics.FromImage(bitmap);
+            graphics.Clear(Color.FromArgb(30, 30, 30));
+            graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+            graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+
+            double scale = Math.Min(
+                (double)targetSize.Width / source.Width,
+                (double)targetSize.Height / source.Height);
+
+            int width = Math.Max(1, (int)Math.Round(source.Width * scale));
+            int height = Math.Max(1, (int)Math.Round(source.Height * scale));
+            int x = (targetSize.Width - width) / 2;
+            int y = (targetSize.Height - height) / 2;
+
+            graphics.DrawImage(source, new Rectangle(x, y, width, height));
+            return bitmap;
+        }
 
         private static Bitmap CreatePlaceholder(string text)
         {
