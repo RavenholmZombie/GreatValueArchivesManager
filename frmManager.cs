@@ -1,14 +1,70 @@
+using System.Diagnostics;
+using Microsoft.Win32;
+using WebP.Net;
+
 namespace GreatValueArchivesManager
 {
     public partial class frmManager : Form
     {
-        private readonly Dictionary<Control, string> _categoryNames = new();
-
-        public frmManager()
+        private static readonly HttpClient Http = new(new SocketsHttpHandler
         {
+            MaxConnectionsPerServer = 8,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(10)
+        })
+        {
+            Timeout = TimeSpan.FromSeconds(20)
+        };
+
+        private readonly Dictionary<Control, string> _categoryNames = new();
+        private readonly ArchiveFtpClient _client;
+        private readonly ImageList _thumbnailImages = new();
+        private readonly SemaphoreSlim _thumbnailGate = new(4);
+        private readonly List<ArchiveItem> _currentItems = [];
+        private readonly Dictionary<string, IReadOnlyList<ArchiveItem>> _categoryCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, ListViewItem> _visibleItemsByPath = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _thumbnailLoadsInProgress = new(StringComparer.OrdinalIgnoreCase);
+        private CancellationTokenSource? _loadCts;
+        private string _currentCategory = "Overview";
+
+        public frmManager(ArchiveFtpClient client)
+        {
+            _client = client;
             InitializeComponent();
+            ConfigureListView();
             WireCategoryButtons();
+            WireActions();
+            BuildMenus();
             ApplyPalette();
+
+            lblConnectionStatus.Text = $"Connected to {_client.Host}";
+            Shown += async (_, _) => await SelectCategoryAsync(btnOverview, "Overview");
+            FormClosing += (_, _) => _loadCts?.Cancel();
+        }
+
+        private void ConfigureListView()
+        {
+            _thumbnailImages.ColorDepth = ColorDepth.Depth32Bit;
+            _thumbnailImages.ImageSize = new Size(160, 120);
+            _thumbnailImages.TransparentColor = Color.Transparent;
+            _thumbnailImages.Images.Add("image", CreatePlaceholder("IMAGE"));
+            _thumbnailImages.Images.Add("video", CreatePlaceholder("VIDEO"));
+            _thumbnailImages.Images.Add("trash", CreatePlaceholder("TRASH"));
+
+            listViewItems.LargeImageList = _thumbnailImages;
+            listViewItems.MultiSelect = true;
+            listViewItems.LabelWrap = true;
+            listViewItems.ShowItemToolTips = true;
+            txtSearch.TextChanged += (_, _) => ApplySearchFilter();
+            listViewItems.DoubleClick += async (_, _) => await PreviewSelectedAsync();
+            listViewItems.KeyDown += async (_, e) =>
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.Handled = true;
+                    e.SuppressKeyPress = true;
+                    await PreviewSelectedAsync();
+                }
+            };
         }
 
         private void WireCategoryButtons()
@@ -28,20 +84,96 @@ namespace GreatValueArchivesManager
             {
                 button.Click += CategoryButton_Click;
             }
-
-            SelectCategory(btnOverview, "Overview");
         }
 
-        private void CategoryButton_Click(object? sender, EventArgs e)
+        private void WireActions()
+        {
+            btnUpload.Click += async (_, _) => await UploadAsync();
+            btnMove.Click += async (_, _) => await MoveSelectedAsync();
+            btnRename.Click += async (_, _) => await RenameSelectedAsync();
+            btnDelete.Click += async (_, _) => await DeleteSelectedAsync();
+            btnRefresh.Click += async (_, _) => await ReloadCurrentCategoryAsync(forceRefresh: true);
+            btnPreview.Click += async (_, _) => await PreviewSelectedAsync();
+        }
+
+        private void BuildMenus()
+        {
+            fileToolStripMenuItem.DropDownItems.Clear();
+            fileToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Upload...", async () => await UploadAsync(), Keys.Control | Keys.U));
+            fileToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Refresh", async () => await ReloadCurrentCategoryAsync(forceRefresh: true), Keys.F5));
+            fileToolStripMenuItem.DropDownItems.Add(new ToolStripSeparator());
+            fileToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Log out", () => { Close(); return Task.CompletedTask; }));
+            fileToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Exit", () => { Application.Exit(); return Task.CompletedTask; }));
+
+            editToolStripMenuItem.DropDownItems.Clear();
+            editToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Rename...", async () => await RenameSelectedAsync(), Keys.F2));
+            editToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Move to...", async () => await MoveSelectedAsync(), Keys.Control | Keys.M));
+            editToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Delete", async () => await DeleteSelectedAsync(), Keys.Delete));
+
+            viewToolStripMenuItem.DropDownItems.Clear();
+            viewToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Preview selected", async () => await PreviewSelectedAsync()));
+            viewToolStripMenuItem.DropDownItems.Add(new ToolStripSeparator());
+            foreach ((Control button, string category) in _categoryNames)
+            {
+                viewToolStripMenuItem.DropDownItems.Add(CreateMenuItem(category, async () => await SelectCategoryAsync(button, category)));
+            }
+
+            toolsToolStripMenuItem.DropDownItems.Clear();
+            toolsToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Open Archive Viewer", () =>
+            {
+                OpenArchiveViewer();
+                return Task.CompletedTask;
+            }));
+            toolsToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Clear Thumbnail Cache", () =>
+            {
+                ThumbnailCache.Clear();
+                ClearInMemoryThumbnails();
+                MessageBox.Show(this, "The thumbnail cache has been cleared.", "Thumbnail Cache", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return ReloadCurrentCategoryAsync(forceRefresh: true);
+            }));
+            toolsToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Open Namecheap / cPanel", () =>
+            {
+                OpenUrl("https://www.namecheap.com/myaccount/login/");
+                return Task.CompletedTask;
+            }));
+
+            helpToolStripMenuItem.DropDownItems.Clear();
+            helpToolStripMenuItem.DropDownItems.Add(CreateMenuItem("About", () =>
+            {
+                MessageBox.Show(
+                    this,
+                    $"Great Value Archives Manager\n\nConnected host: {_client.Host}\nArchive root: {_client.MediaRoot}",
+                    "About",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return Task.CompletedTask;
+            }));
+        }
+
+        private ToolStripMenuItem CreateMenuItem(string text, Func<Task> action, Keys shortcutKeys = Keys.None)
+        {
+            ToolStripMenuItem item = new(text)
+            {
+                BackColor = Color.FromArgb(45, 45, 48),
+                ForeColor = Color.WhiteSmoke,
+                ShortcutKeys = shortcutKeys
+            };
+            item.Click += async (_, _) => await RunUiActionAsync(action);
+            return item;
+        }
+
+        private async void CategoryButton_Click(object? sender, EventArgs e)
         {
             if (sender is Control button && _categoryNames.TryGetValue(button, out string? category))
             {
-                SelectCategory(button, category);
+                await SelectCategoryAsync(button, category);
             }
         }
 
-        private void SelectCategory(Control selectedButton, string category)
+        private async Task SelectCategoryAsync(Control selectedButton, string category)
         {
+            _currentCategory = category;
+
             foreach (Control button in _categoryNames.Keys)
             {
                 button.BackColor = Color.FromArgb(45, 45, 48);
@@ -55,15 +187,601 @@ namespace GreatValueArchivesManager
             lblCategoryStatus.Text = $"Category: {category}";
             lblSubtitle.Text = category switch
             {
-                "Overview" => "Browse and manage archived media.",
-                "Trash" => "Review items removed from public archive categories.",
+                "Overview" => "Browse all archived media across every public category.",
+                "Trash" => "Review removed items or permanently delete them.",
                 _ => $"Manage files in {category}."
             };
+
+            btnUpload.Enabled = category != "Trash";
+            btnMove.Enabled = category != "Overview";
+            btnRename.Enabled = category != "Overview";
+            btnDelete.Enabled = category != "Overview";
+            txtSearch.Clear();
+
+            await ReloadCurrentCategoryAsync();
+        }
+
+        private async Task ReloadCurrentCategoryAsync(bool forceRefresh = false)
+        {
+            _loadCts?.Cancel();
+            _loadCts?.Dispose();
+            _loadCts = new CancellationTokenSource();
+            CancellationToken token = _loadCts.Token;
+
+            SetBusy(true, forceRefresh ? "Refreshing archive items..." : "Loading archive items...");
+            try
+            {
+                IReadOnlyList<ArchiveItem> items;
+                if (!forceRefresh && _categoryCache.TryGetValue(_currentCategory, out IReadOnlyList<ArchiveItem>? cached))
+                {
+                    items = cached;
+                }
+                else
+                {
+                    items = await _client.ListCategoryAsync(_currentCategory, token);
+                    token.ThrowIfCancellationRequested();
+                    CacheCategoryResult(_currentCategory, items);
+                }
+
+                _currentItems.Clear();
+                _currentItems.AddRange(items);
+                ApplySearchFilter();
+                lblItemCount.Text = $"{_currentItems.Count:N0} items";
+
+                foreach (ArchiveItem item in items.Where(i => !i.IsVideo && i.PublicUrl is not null))
+                {
+                    _ = LoadThumbnailAsync(item, token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // A newer category/refresh request replaced this one.
+            }
+            catch (Exception ex)
+            {
+                ShowOperationError("Could not load this archive category.", ex);
+            }
+            finally
+            {
+                if (!token.IsCancellationRequested)
+                {
+                    SetBusy(false, "Ready");
+                }
+            }
+        }
+
+        private void CacheCategoryResult(string category, IReadOnlyList<ArchiveItem> items)
+        {
+            _categoryCache[category] = items;
+
+            if (category.Equals("Overview", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (IGrouping<string, ArchiveItem> group in items.GroupBy(i => i.Category, StringComparer.OrdinalIgnoreCase))
+                {
+                    _categoryCache[group.Key] = group.OrderBy(i => i.FileName, StringComparer.OrdinalIgnoreCase).ToArray();
+                }
+            }
+            else
+            {
+                _categoryCache.Remove("Overview");
+            }
+        }
+
+        private void InvalidateArchiveCaches()
+        {
+            _categoryCache.Clear();
+        }
+
+        private void ApplySearchFilter()
+        {
+            string filter = txtSearch.Text.Trim();
+            IEnumerable<ArchiveItem> filtered = string.IsNullOrWhiteSpace(filter)
+                ? _currentItems
+                : _currentItems.Where(i => i.FileName.Contains(filter, StringComparison.OrdinalIgnoreCase));
+
+            listViewItems.BeginUpdate();
+            try
+            {
+                listViewItems.Items.Clear();
+                _visibleItemsByPath.Clear();
+
+                foreach (ArchiveItem item in filtered)
+                {
+                    string imageKey = GetImageKey(item);
+                    ListViewItem listItem = new(item.FileName, imageKey)
+                    {
+                        Tag = item,
+                        ToolTipText = item.Category == _currentCategory
+                            ? item.FileName
+                            : $"{item.FileName}\n{item.Category}"
+                    };
+                    listViewItems.Items.Add(listItem);
+                    _visibleItemsByPath[item.RemotePath] = listItem;
+                }
+            }
+            finally
+            {
+                listViewItems.EndUpdate();
+            }
+
+            lblItemCount.Text = $"{listViewItems.Items.Count:N0} of {_currentItems.Count:N0} items";
+        }
+
+        private async Task LoadThumbnailAsync(ArchiveItem item, CancellationToken token)
+        {
+            string key = item.RemotePath;
+            if (_thumbnailImages.Images.ContainsKey(key) || item.PublicUrl is null || !_thumbnailLoadsInProgress.Add(key))
+            {
+                return;
+            }
+
+            bool gateEntered = false;
+            Bitmap? thumbnail = null;
+
+            try
+            {
+                await _thumbnailGate.WaitAsync(token);
+                gateEntered = true;
+
+                if (_thumbnailImages.Images.ContainsKey(key))
+                {
+                    return;
+                }
+
+                thumbnail = await Task.Run(() => ThumbnailCache.TryLoad(key), token);
+
+                if (thumbnail is null)
+                {
+                    byte[] bytes = await Http.GetByteArrayAsync(item.PublicUrl, token);
+                    thumbnail = await Task.Run(() =>
+                    {
+                        using Image source = DecodeThumbnailSource(bytes, item.FileName);
+                        Bitmap rendered = CreateAspectFitThumbnail(source, _thumbnailImages.ImageSize);
+                        ThumbnailCache.Save(key, rendered);
+                        return rendered;
+                    }, token);
+                }
+
+                token.ThrowIfCancellationRequested();
+                _thumbnailImages.Images.Add(key, new Bitmap(thumbnail));
+
+                if (_visibleItemsByPath.TryGetValue(item.RemotePath, out ListViewItem? visibleItem))
+                {
+                    visibleItem.ImageKey = key;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch
+            {
+                // The generic image placeholder remains when an individual thumbnail cannot be loaded.
+            }
+            finally
+            {
+                thumbnail?.Dispose();
+                if (gateEntered)
+                {
+                    _thumbnailGate.Release();
+                }
+                _thumbnailLoadsInProgress.Remove(key);
+            }
+        }
+
+        private static Image DecodeThumbnailSource(byte[] bytes, string fileName)
+        {
+            if (bytes is null || bytes.Length == 0)
+            {
+                return CreatePlaceholder("IMAGE");
+            }
+
+            if (Path.GetExtension(fileName).Equals(".webp", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    return WebPDecoder.Decode(bytes);
+                }
+                catch
+                {
+                    return CreatePlaceholder("IMAGE");
+                }
+            }
+
+            try
+            {
+                using MemoryStream stream = new(bytes, writable: false);
+                 using Image decoded = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: true);
+                return new Bitmap(decoded);
+            }
+            catch (ArgumentException)
+            {
+                // GDI+ does not understand every modern or unusually encoded image.
+                // ImageSharp auto-detects the actual byte format, so use it as the fallback
+                // regardless of the filename extension.
+                try
+                {
+                    return WebPDecoder.Decode(bytes);
+                }
+                catch
+                {
+                    return CreatePlaceholder("IMAGE");
+                }
+            }
+            catch (OutOfMemoryException)
+            {
+                // GDI+ also reports some invalid/unsupported image data as OOM.
+                try
+                {
+                    return WebPDecoder.Decode(bytes);
+                }
+                catch
+                {
+                    return CreatePlaceholder("IMAGE");
+                }
+            }
+        }
+
+        private async Task UploadAsync()
+        {
+            string? targetCategory = _currentCategory;
+            if (targetCategory is "Overview" or "Trash")
+            {
+                targetCategory = DarkDialogs.ChooseCategory(this, "Upload", "Choose the category for the uploaded files:");
+                if (targetCategory is null)
+                {
+                    return;
+                }
+            }
+
+            using OpenFileDialog dialog = new()
+            {
+                Multiselect = true,
+                Title = $"Upload to {targetCategory}",
+                Filter = "Archive media|*.jpg;*.jpeg;*.png;*.gif;*.webp;*.avif;*.mp4;*.webm;*.ogg;*.mov;*.m4v|All files|*.*"
+            };
+
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+            {
+                return;
+            }
+
+            await RunUiActionAsync(async () =>
+            {
+                SetBusy(true, $"Uploading {dialog.FileNames.Length} file(s)...");
+                foreach (string file in dialog.FileNames)
+                {
+                    await _client.UploadFileAsync(file, targetCategory);
+                }
+                InvalidateArchiveCaches();
+                await ReloadCurrentCategoryAsync(forceRefresh: true);
+            });
+        }
+
+        private async Task RenameSelectedAsync()
+        {
+            ArchiveItem? item = GetSingleSelectedItem("Select one item to rename.");
+            if (item is null)
+            {
+                return;
+            }
+
+            string? newName = DarkDialogs.Prompt(this, "Rename", "New file name:", item.FileName);
+            if (string.IsNullOrWhiteSpace(newName) || newName.Equals(item.FileName, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            await RunUiActionAsync(async () =>
+            {
+                SetBusy(true, $"Renaming {item.FileName}...");
+                await _client.RenameAsync(item, newName);
+                InvalidateArchiveCaches();
+                await ReloadCurrentCategoryAsync(forceRefresh: true);
+            });
+        }
+
+        private async Task MoveSelectedAsync()
+        {
+            IReadOnlyList<ArchiveItem> selected = GetSelectedItems();
+            if (selected.Count == 0)
+            {
+                ShowSelectionMessage("Select one or more items to move.");
+                return;
+            }
+
+            string? target = DarkDialogs.ChooseCategory(this, "Move Items", "Move selected items to:", _currentCategory);
+            if (target is null)
+            {
+                return;
+            }
+
+            await RunUiActionAsync(async () =>
+            {
+                SetBusy(true, $"Moving {selected.Count} item(s) to {target}...");
+                foreach (ArchiveItem item in selected)
+                {
+                    await _client.MoveAsync(item, target);
+                }
+                InvalidateArchiveCaches();
+                await ReloadCurrentCategoryAsync(forceRefresh: true);
+            });
+        }
+
+        private async Task DeleteSelectedAsync()
+        {
+            IReadOnlyList<ArchiveItem> selected = GetSelectedItems();
+            if (selected.Count == 0)
+            {
+                ShowSelectionMessage("Select one or more items to delete.");
+                return;
+            }
+
+            bool permanent = _currentCategory.Equals("Trash", StringComparison.OrdinalIgnoreCase);
+            string prompt = permanent
+                ? $"Permanently delete {selected.Count} selected item(s)? This cannot be undone."
+                : $"Move {selected.Count} selected item(s) to Trash?";
+
+            DialogResult answer = MessageBox.Show(
+                this,
+                prompt,
+                permanent ? "Permanently Delete" : "Move to Trash",
+                MessageBoxButtons.YesNo,
+                permanent ? MessageBoxIcon.Warning : MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button2);
+
+            if (answer != DialogResult.Yes)
+            {
+                return;
+            }
+
+            await RunUiActionAsync(async () =>
+            {
+                SetBusy(true, permanent ? "Deleting items..." : "Moving items to Trash...");
+                foreach (ArchiveItem item in selected)
+                {
+                    if (permanent)
+                    {
+                        await _client.PermanentlyDeleteAsync(item);
+                    }
+                    else
+                    {
+                        await _client.MoveToTrashAsync(item);
+                    }
+                }
+                InvalidateArchiveCaches();
+                await ReloadCurrentCategoryAsync(forceRefresh: true);
+            });
+        }
+
+        private async Task PreviewSelectedAsync()
+        {
+            ArchiveItem? item = GetSingleSelectedItem("Select one item to preview.", showMessage: false);
+            if (item is null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (item.PublicUrl is not null)
+                {
+                    if (item.IsVideo)
+                    {
+                        if (TryStreamVideoWithVlc(item.PublicUrl))
+                        {
+                            return;
+                        }
+
+                        DialogResult fallback = MessageBox.Show(
+                            this,
+                            "VLC Media Player could not be found on this computer. Open the video in your default web browser instead?",
+                            "VLC Not Found",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Information,
+                            MessageBoxDefaultButton.Button1);
+
+                        if (fallback != DialogResult.Yes)
+                        {
+                            return;
+                        }
+                    }
+
+                    OpenUrl(item.PublicUrl);
+                    return;
+                }
+
+                SetBusy(true, $"Downloading {item.FileName} for preview...");
+                byte[] bytes = await _client.DownloadFileAsync(item.RemotePath);
+                string tempFolder = Path.Combine(Path.GetTempPath(), "GreatValueArchivesManager");
+                Directory.CreateDirectory(tempFolder);
+                string tempPath = Path.Combine(tempFolder, item.FileName);
+                await File.WriteAllBytesAsync(tempPath, bytes);
+                Process.Start(new ProcessStartInfo(tempPath) { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                ShowOperationError("Could not preview the selected item.", ex);
+            }
+            finally
+            {
+                SetBusy(false, "Ready");
+            }
+        }
+
+        private static bool TryStreamVideoWithVlc(string url)
+        {
+            string? vlcPath = FindVlcExecutable();
+            if (string.IsNullOrWhiteSpace(vlcPath))
+            {
+                return false;
+            }
+
+            ProcessStartInfo startInfo = new(vlcPath)
+            {
+                UseShellExecute = false
+            };
+            startInfo.ArgumentList.Add(url);
+            Process.Start(startInfo);
+            return true;
+        }
+
+        private static string? FindVlcExecutable()
+        {
+            string[] registryPaths =
+            [
+                @"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\vlc.exe",
+                @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\vlc.exe"
+            ];
+
+            foreach (RegistryHive hive in new[] { RegistryHive.CurrentUser, RegistryHive.LocalMachine })
+            {
+                using RegistryKey baseKey = RegistryKey.OpenBaseKey(hive, RegistryView.Default);
+                foreach (string registryPath in registryPaths)
+                {
+                    using RegistryKey? key = baseKey.OpenSubKey(registryPath);
+                    if (key?.GetValue(null) is string registeredPath && File.Exists(registeredPath))
+                    {
+                        return registeredPath;
+                    }
+                }
+            }
+
+            string[] commonPaths =
+            [
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "VideoLAN", "VLC", "vlc.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "VideoLAN", "VLC", "vlc.exe")
+            ];
+
+            return commonPaths.FirstOrDefault(File.Exists);
+        }
+
+        private IReadOnlyList<ArchiveItem> GetSelectedItems() =>
+            listViewItems.SelectedItems.Cast<ListViewItem>()
+                .Select(i => i.Tag)
+                .OfType<ArchiveItem>()
+                .ToArray();
+
+        private ArchiveItem? GetSingleSelectedItem(string message, bool showMessage = true)
+        {
+            IReadOnlyList<ArchiveItem> selected = GetSelectedItems();
+            if (selected.Count == 1)
+            {
+                return selected[0];
+            }
+
+            if (showMessage)
+            {
+                ShowSelectionMessage(message);
+            }
+            return null;
+        }
+
+        private async Task RunUiActionAsync(Func<Task> action)
+        {
+            try
+            {
+                await action();
+            }
+            catch (Exception ex)
+            {
+                ShowOperationError("The FTP operation failed.", ex);
+                SetBusy(false, "Ready");
+            }
+        }
+
+        private void SetBusy(bool busy, string status)
+        {
+            UseWaitCursor = busy;
+            lblConnectionStatus.Text = busy ? status : $"Connected to {_client.Host}";
+            btnUpload.Enabled = !busy && _currentCategory != "Trash";
+            btnMove.Enabled = !busy && _currentCategory != "Overview";
+            btnRename.Enabled = !busy && _currentCategory != "Overview";
+            btnDelete.Enabled = !busy && _currentCategory != "Overview";
+            btnRefresh.Enabled = !busy;
+            btnPreview.Enabled = !busy;
+        }
+
+        private string GetImageKey(ArchiveItem item)
+        {
+            if (_thumbnailImages.Images.ContainsKey(item.RemotePath))
+            {
+                return item.RemotePath;
+            }
+            if (_currentCategory == "Trash")
+            {
+                return "trash";
+            }
+            return item.IsVideo ? "video" : "image";
+        }
+
+        private void ClearInMemoryThumbnails()
+        {
+            for (int i = _thumbnailImages.Images.Count - 1; i >= 0; i--)
+            {
+                string key = _thumbnailImages.Images.Keys[i];
+                if (key is not "image" and not "video" and not "trash")
+                {
+                    _thumbnailImages.Images.RemoveAt(i);
+                }
+            }
+            ApplySearchFilter();
+        }
+
+        private void OpenArchiveViewer()
+        {
+            string url = _currentCategory is "Overview" or "Trash"
+                ? "https://gvarchive.com/viewer/"
+                : $"https://gvarchive.com/viewer/?category={Uri.EscapeDataString(_currentCategory)}";
+            OpenUrl(url);
+        }
+
+        private static void OpenUrl(string url) =>
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+
+        private void ShowSelectionMessage(string message) =>
+            MessageBox.Show(this, message, "Select Archive Item", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+        private void ShowOperationError(string heading, Exception ex) =>
+            MessageBox.Show(this, $"{heading}\n\n{ex.Message}", "Great Value Archives Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+        private static Bitmap CreateAspectFitThumbnail(Image source, Size targetSize)
+        {
+            Bitmap bitmap = new(targetSize.Width, targetSize.Height);
+            using Graphics graphics = Graphics.FromImage(bitmap);
+            graphics.Clear(Color.FromArgb(30, 30, 30));
+            graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighQuality;
+            graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+
+            double scale = Math.Min(
+                (double)targetSize.Width / source.Width,
+                (double)targetSize.Height / source.Height);
+
+            int width = Math.Max(1, (int)Math.Round(source.Width * scale));
+            int height = Math.Max(1, (int)Math.Round(source.Height * scale));
+            int x = (targetSize.Width - width) / 2;
+            int y = (targetSize.Height - height) / 2;
+
+            graphics.DrawImage(source, new Rectangle(x, y, width, height));
+            return bitmap;
+        }
+
+        private static Bitmap CreatePlaceholder(string text)
+        {
+            Bitmap bitmap = new(160, 120);
+            using Graphics graphics = Graphics.FromImage(bitmap);
+            graphics.Clear(Color.FromArgb(37, 37, 38));
+            using Pen border = new(Color.FromArgb(62, 62, 66));
+            graphics.DrawRectangle(border, 0, 0, 159, 119);
+            using Font font = new("Segoe UI Semibold", 11F, FontStyle.Bold);
+            SizeF size = graphics.MeasureString(text, font);
+            graphics.DrawString(text, font, Brushes.Gainsboro, (160 - size.Width) / 2, (120 - size.Height) / 2);
+            return bitmap;
         }
 
         private void ApplyPalette()
         {
-            // VS dark theme palette: #007acc, #3e3e42, #2d2d30, #252526, #1e1e1e
             BackColor = Color.FromArgb(62, 62, 66);
             pnlSidebar.BackColor = Color.FromArgb(45, 45, 48);
             pnlHeader.BackColor = Color.FromArgb(37, 37, 38);
