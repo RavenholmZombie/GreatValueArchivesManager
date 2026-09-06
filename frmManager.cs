@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Win32;
 using WebP.Net;
 
 namespace GreatValueArchivesManager
@@ -450,6 +451,27 @@ namespace GreatValueArchivesManager
             {
                 if (item.PublicUrl is not null)
                 {
+                    if (item.IsVideo)
+                    {
+                        if (TryStreamVideoWithVlc(item.PublicUrl))
+                        {
+                            return;
+                        }
+
+                        DialogResult fallback = MessageBox.Show(
+                            this,
+                            "VLC Media Player could not be found on this computer. Open the video in your default web browser instead?",
+                            "VLC Not Found",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Information,
+                            MessageBoxDefaultButton.Button1);
+
+                        if (fallback != DialogResult.Yes)
+                        {
+                            return;
+                        }
+                    }
+
                     OpenUrl(item.PublicUrl);
                     return;
                 }
@@ -470,6 +492,53 @@ namespace GreatValueArchivesManager
             {
                 SetBusy(false, "Ready");
             }
+        }
+
+        private static bool TryStreamVideoWithVlc(string url)
+        {
+            string? vlcPath = FindVlcExecutable();
+            if (string.IsNullOrWhiteSpace(vlcPath))
+            {
+                return false;
+            }
+
+            ProcessStartInfo startInfo = new(vlcPath)
+            {
+                UseShellExecute = false
+            };
+            startInfo.ArgumentList.Add(url);
+            Process.Start(startInfo);
+            return true;
+        }
+
+        private static string? FindVlcExecutable()
+        {
+            string[] registryPaths =
+            [
+                @"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\vlc.exe",
+                @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\vlc.exe"
+            ];
+
+            foreach (RegistryHive hive in new[] { RegistryHive.CurrentUser, RegistryHive.LocalMachine })
+            {
+                using RegistryKey baseKey = RegistryKey.OpenBaseKey(hive, RegistryView.Default);
+                foreach (string registryPath in registryPaths)
+                {
+                    using RegistryKey? key = baseKey.OpenSubKey(registryPath);
+                    if (key?.GetValue(null) is string registeredPath && File.Exists(registeredPath))
+                    {
+                        return registeredPath;
+                    }
+                }
+            }
+
+            string[] commonPaths =
+            [
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "VideoLAN", "VLC", "vlc.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "VideoLAN", "VLC", "vlc.exe")
+            ];
+
+            return commonPaths.FirstOrDefault(File.Exists);
         }
 
         private IReadOnlyList<ArchiveItem> GetSelectedItems() =>
