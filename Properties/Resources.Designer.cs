@@ -79,5 +79,15 @@ namespace GreatValueArchivesManager.Properties {
                 return ((System.Drawing.Bitmap)(obj));
             }
         }
+        
+        /// <summary>
+        ///   Looks up a localized resource of type System.Drawing.Bitmap.
+        /// </summary>
+        internal static System.Drawing.Bitmap h4wwp8hfv9i51 {
+            get {
+                object obj = ResourceManager.GetObject("h4wwp8hfv9i51", resourceCulture);
+                return ((System.Drawing.Bitmap)(obj));
+            }
+        }
     }
 }

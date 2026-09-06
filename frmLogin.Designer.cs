@@ -38,8 +38,8 @@
             // 
             // panel1
             // 
-            panel1.BackgroundImage = Properties.Resources.aurora;
-            panel1.BackgroundImageLayout = ImageLayout.None;
+            panel1.BackgroundImage = Properties.Resources.h4wwp8hfv9i51;
+            panel1.BackgroundImageLayout = ImageLayout.Stretch;
             panel1.BorderStyle = BorderStyle.FixedSingle;
             panel1.Controls.Add(pictureBox1);
             panel1.Dock = DockStyle.Top;
@@ -97,7 +97,7 @@
             lblIntro.AutoSize = true;
             lblIntro.Location = new Point(75, 121);
             lblIntro.Name = "lblIntro";
-            lblIntro.Size = new Size(283, 15);
+            lblIntro.Size = new Size(269, 15);
             lblIntro.TabIndex = 10;
             lblIntro.Text = "Connect to the Great Value Archives FTP to begin.";
             // 
@@ -135,7 +135,7 @@
             chkUseTls.CheckState = CheckState.Checked;
             chkUseTls.Location = new Point(69, 318);
             chkUseTls.Name = "chkUseTls";
-            chkUseTls.Size = new Size(188, 19);
+            chkUseTls.Size = new Size(185, 19);
             chkUseTls.TabIndex = 4;
             chkUseTls.Text = "Use FTPS (TLS) when available";
             chkUseTls.UseVisualStyleBackColor = true;
@@ -145,7 +145,7 @@
             chkRememberCredentials.AutoSize = true;
             chkRememberCredentials.Location = new Point(69, 343);
             chkRememberCredentials.Name = "chkRememberCredentials";
-            chkRememberCredentials.Size = new Size(150, 19);
+            chkRememberCredentials.Size = new Size(144, 19);
             chkRememberCredentials.TabIndex = 5;
             chkRememberCredentials.Text = "Remember credentials";
             chkRememberCredentials.UseVisualStyleBackColor = true;
@@ -158,7 +158,6 @@
             lblStatus.Name = "lblStatus";
             lblStatus.Size = new Size(295, 34);
             lblStatus.TabIndex = 14;
-            lblStatus.Text = "";
             lblStatus.TextAlign = ContentAlignment.MiddleLeft;
             // 
             // btnLogin
