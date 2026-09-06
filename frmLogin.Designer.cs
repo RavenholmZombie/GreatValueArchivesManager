@@ -28,6 +28,7 @@
             lblUser = new Label();
             lblPass = new Label();
             chkUseTls = new CheckBox();
+            chkRememberCredentials = new CheckBox();
             lblStatus = new Label();
             btnLogin = new ReaLTaiizor.Controls.CrownButton();
             btnCPanel = new ReaLTaiizor.Controls.CrownButton();
@@ -139,11 +140,21 @@
             chkUseTls.Text = "Use FTPS (TLS) when available";
             chkUseTls.UseVisualStyleBackColor = true;
             // 
+            // chkRememberCredentials
+            // 
+            chkRememberCredentials.AutoSize = true;
+            chkRememberCredentials.Location = new Point(69, 343);
+            chkRememberCredentials.Name = "chkRememberCredentials";
+            chkRememberCredentials.Size = new Size(150, 19);
+            chkRememberCredentials.TabIndex = 5;
+            chkRememberCredentials.Text = "Remember credentials";
+            chkRememberCredentials.UseVisualStyleBackColor = true;
+            // 
             // lblStatus
             // 
             lblStatus.AutoEllipsis = true;
             lblStatus.ForeColor = Color.FromArgb(180, 180, 180);
-            lblStatus.Location = new Point(69, 347);
+            lblStatus.Location = new Point(69, 372);
             lblStatus.Name = "lblStatus";
             lblStatus.Size = new Size(295, 34);
             lblStatus.TabIndex = 14;
@@ -152,20 +163,20 @@
             // 
             // btnLogin
             // 
-            btnLogin.Location = new Point(272, 394);
+            btnLogin.Location = new Point(272, 419);
             btnLogin.Name = "btnLogin";
             btnLogin.Padding = new Padding(5);
             btnLogin.Size = new Size(92, 30);
-            btnLogin.TabIndex = 5;
+            btnLogin.TabIndex = 6;
             btnLogin.Text = "Connect";
             // 
             // btnCPanel
             // 
-            btnCPanel.Location = new Point(69, 394);
+            btnCPanel.Location = new Point(69, 419);
             btnCPanel.Name = "btnCPanel";
             btnCPanel.Padding = new Padding(5);
             btnCPanel.Size = new Size(92, 30);
-            btnCPanel.TabIndex = 6;
+            btnCPanel.TabIndex = 7;
             btnCPanel.Text = "Open CPanel";
             // 
             // frmLogin
@@ -173,10 +184,11 @@
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
             BackColor = Color.FromArgb(62, 62, 66);
-            ClientSize = new Size(433, 452);
+            ClientSize = new Size(433, 477);
             Controls.Add(btnCPanel);
             Controls.Add(btnLogin);
             Controls.Add(lblStatus);
+            Controls.Add(chkRememberCredentials);
             Controls.Add(chkUseTls);
             Controls.Add(lblPass);
             Controls.Add(lblUser);
@@ -212,6 +224,7 @@
         private Label lblUser;
         private Label lblPass;
         private CheckBox chkUseTls;
+        private CheckBox chkRememberCredentials;
         private Label lblStatus;
         private ReaLTaiizor.Controls.CrownButton btnLogin;
         private ReaLTaiizor.Controls.CrownButton btnCPanel;
