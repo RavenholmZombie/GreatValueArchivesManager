@@ -390,7 +390,7 @@ namespace GreatValueArchivesManager
             try
             {
                 using MemoryStream stream = new(bytes, writable: false);
-                using Image decoded = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: true);
+                 using Image decoded = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: true);
                 return new Bitmap(decoded);
             }
             catch (ArgumentException)
