@@ -370,14 +370,55 @@ namespace GreatValueArchivesManager
 
         private static Image DecodeThumbnailSource(byte[] bytes, string fileName)
         {
-            if (Path.GetExtension(fileName).Equals(".webp", StringComparison.OrdinalIgnoreCase))
+            if (bytes is null || bytes.Length == 0)
             {
-                return WebPDecoder.Decode(bytes);
+                return CreatePlaceholder("IMAGE");
             }
 
-            using MemoryStream stream = new(bytes);
-            using Image decoded = Image.FromStream(stream);
-            return new Bitmap(decoded);
+            if (Path.GetExtension(fileName).Equals(".webp", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    return WebPDecoder.Decode(bytes);
+                }
+                catch
+                {
+                    return CreatePlaceholder("IMAGE");
+                }
+            }
+
+            try
+            {
+                using MemoryStream stream = new(bytes, writable: false);
+                using Image decoded = Image.FromStream(stream, useEmbeddedColorManagement: false, validateImageData: true);
+                return new Bitmap(decoded);
+            }
+            catch (ArgumentException)
+            {
+                // GDI+ does not understand every modern or unusually encoded image.
+                // ImageSharp auto-detects the actual byte format, so use it as the fallback
+                // regardless of the filename extension.
+                try
+                {
+                    return WebPDecoder.Decode(bytes);
+                }
+                catch
+                {
+                    return CreatePlaceholder("IMAGE");
+                }
+            }
+            catch (OutOfMemoryException)
+            {
+                // GDI+ also reports some invalid/unsupported image data as OOM.
+                try
+                {
+                    return WebPDecoder.Decode(bytes);
+                }
+                catch
+                {
+                    return CreatePlaceholder("IMAGE");
+                }
+            }
         }
 
         private async Task UploadAsync()
