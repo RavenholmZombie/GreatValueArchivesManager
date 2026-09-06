@@ -8,7 +8,7 @@ internal static class ThumbnailCache
     private static readonly string CacheDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "GreatValueArchivesManager",
-        "ThumbnailCache");
+        "ThumbnailCache-v2");
 
     public static Bitmap? TryLoad(string cacheKey)
     {
@@ -22,7 +22,18 @@ internal static class ThumbnailCache
         {
             using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             using Image image = Image.FromStream(stream);
-            return new Bitmap(image);
+            Bitmap bitmap = new(image);
+
+            // Older builds could accidentally cache the generic IMAGE placeholder as if
+            // it were a successful thumbnail. Never return one of those as real content.
+            if (LooksLikePlaceholder(bitmap))
+            {
+                bitmap.Dispose();
+                TryDelete(path);
+                return null;
+            }
+
+            return bitmap;
         }
         catch
         {
@@ -33,6 +44,12 @@ internal static class ThumbnailCache
 
     public static void Save(string cacheKey, Bitmap bitmap)
     {
+        // A failed decode must never poison the persistent cache with our placeholder.
+        if (LooksLikePlaceholder(bitmap))
+        {
+            return;
+        }
+
         try
         {
             Directory.CreateDirectory(CacheDirectory);
@@ -52,15 +69,51 @@ internal static class ThumbnailCache
     {
         try
         {
-            if (Directory.Exists(CacheDirectory))
+            string appDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "GreatValueArchivesManager");
+
+            if (!Directory.Exists(appDirectory))
             {
-                Directory.Delete(CacheDirectory, recursive: true);
+                return;
+            }
+
+            foreach (string directory in Directory.EnumerateDirectories(appDirectory, "ThumbnailCache*"))
+            {
+                try
+                {
+                    Directory.Delete(directory, recursive: true);
+                }
+                catch
+                {
+                }
             }
         }
         catch
         {
         }
     }
+
+    private static bool LooksLikePlaceholder(Bitmap bitmap)
+    {
+        if (bitmap.Width != 160 || bitmap.Height != 120)
+        {
+            return false;
+        }
+
+        // CreatePlaceholder() paints this exact dark background and border. Sampling
+        // several quiet pixels avoids mistaking a normal 160x120 image for the placeholder.
+        Color background = Color.FromArgb(37, 37, 38);
+        Color border = Color.FromArgb(62, 62, 66);
+
+        return SameRgb(bitmap.GetPixel(10, 10), background) &&
+               SameRgb(bitmap.GetPixel(149, 10), background) &&
+               SameRgb(bitmap.GetPixel(10, 109), background) &&
+               SameRgb(bitmap.GetPixel(0, 0), border);
+    }
+
+    private static bool SameRgb(Color left, Color right) =>
+        left.R == right.R && left.G == right.G && left.B == right.B;
 
     private static string GetCachePath(string cacheKey)
     {
