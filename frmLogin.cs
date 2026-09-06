@@ -86,6 +86,11 @@ namespace GreatValueArchivesManager
                 }
                 catch (Exception settingsEx)
                 {
+                    if (IsShuttingDown())
+                    {
+                        return;
+                    }
+
                     MessageBox.Show(
                         this,
                         $"The archive login succeeded, but the saved login settings could not be updated.\r\n\r\n{settingsEx.Message}",
@@ -94,11 +99,25 @@ namespace GreatValueArchivesManager
                         MessageBoxIcon.Warning);
                 }
 
+                if (IsShuttingDown())
+                {
+                    return;
+                }
+
                 lblStatus.Text = $"Connected. Media root: {client.MediaRoot}";
 
                 Hide();
                 using frmManager manager = new(client);
                 manager.ShowDialog(this);
+
+                // File > Exit calls Application.Exit(), which disposes this hidden
+                // login form while ShowDialog is still unwinding. Do not touch any
+                // controls after that happens.
+                if (IsShuttingDown())
+                {
+                    return;
+                }
+
                 Show();
 
                 if (!chkRememberCredentials.Checked)
@@ -110,6 +129,11 @@ namespace GreatValueArchivesManager
             }
             catch (WebException ex)
             {
+                if (IsShuttingDown())
+                {
+                    return;
+                }
+
                 MessageBox.Show(
                     this,
                     BuildFtpErrorMessage(ex, host, chkUseTls.Checked),
@@ -118,8 +142,17 @@ namespace GreatValueArchivesManager
                     MessageBoxIcon.Error);
                 lblStatus.Text = "Connection failed.";
             }
+            catch (ObjectDisposedException) when (IsShuttingDown())
+            {
+                // Normal application shutdown while frmManager is open.
+            }
             catch (Exception ex)
             {
+                if (IsShuttingDown())
+                {
+                    return;
+                }
+
                 MessageBox.Show(
                     this,
                     BuildConnectionErrorMessage(ex, host, chkUseTls.Checked),
@@ -130,9 +163,14 @@ namespace GreatValueArchivesManager
             }
             finally
             {
-                SetBusy(false);
+                if (!IsShuttingDown())
+                {
+                    SetBusy(false);
+                }
             }
         }
+
+        private bool IsShuttingDown() => IsDisposed || Disposing;
 
         private void SetBusy(bool busy, string? statusText = null)
         {
