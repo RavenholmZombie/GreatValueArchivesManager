@@ -9,6 +9,7 @@ namespace GreatValueArchivesManager
         {
             InitializeComponent();
             ApplyPalette();
+            LoadSavedLogin();
             btnLogin.Click += btnLogin_Click;
             btnCPanel.Click += btnCPanel_Click;
         }
@@ -30,6 +31,24 @@ namespace GreatValueArchivesManager
             btnCPanel.BackColor = Color.FromArgb(45, 45, 48);
             btnCPanel.ForeColor = Color.WhiteSmoke;
             chkUseTls.ForeColor = Color.WhiteSmoke;
+            chkRememberCredentials.ForeColor = Color.WhiteSmoke;
+        }
+
+        private void LoadSavedLogin()
+        {
+            try
+            {
+                SavedLoginSettings saved = LoginSettingsStore.Load();
+                txtBoxHost.Text = saved.Host;
+                txtBoxUser.Text = saved.Username;
+                txtBoxPass.Text = saved.Password;
+                chkUseTls.Checked = saved.UseTls;
+                chkRememberCredentials.Checked = saved.RememberCredentials;
+            }
+            catch
+            {
+                // Saved credentials are a convenience only; login should still work if they cannot be read.
+            }
         }
 
         private async void btnLogin_Click(object? sender, EventArgs e)
@@ -55,13 +74,38 @@ namespace GreatValueArchivesManager
             try
             {
                 await client.ConnectAndDiscoverAsync();
+
+                try
+                {
+                    LoginSettingsStore.Save(
+                        host,
+                        username,
+                        password,
+                        chkUseTls.Checked,
+                        chkRememberCredentials.Checked);
+                }
+                catch (Exception settingsEx)
+                {
+                    MessageBox.Show(
+                        this,
+                        $"The archive login succeeded, but the saved login settings could not be updated.\r\n\r\n{settingsEx.Message}",
+                        "Could Not Save Credentials",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+
                 lblStatus.Text = $"Connected. Media root: {client.MediaRoot}";
 
                 Hide();
                 using frmManager manager = new(client);
                 manager.ShowDialog(this);
                 Show();
-                txtBoxPass.Clear();
+
+                if (!chkRememberCredentials.Checked)
+                {
+                    txtBoxPass.Clear();
+                }
+
                 lblStatus.Text = "Disconnected.";
             }
             catch (WebException ex)
@@ -96,6 +140,7 @@ namespace GreatValueArchivesManager
             txtBoxUser.Enabled = !busy;
             txtBoxPass.Enabled = !busy;
             chkUseTls.Enabled = !busy;
+            chkRememberCredentials.Enabled = !busy;
             btnLogin.Enabled = !busy;
             btnCPanel.Enabled = !busy;
             UseWaitCursor = busy;
