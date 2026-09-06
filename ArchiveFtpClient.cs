@@ -17,6 +17,7 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
     private static readonly string[] VideoExtensions = [".mp4", ".webm", ".ogg", ".mov", ".m4v"];
     private const int MaxDiscoveryDepth = 6;
     private const int MaxDiscoveryDirectories = 250;
+    private const int ConnectionHealthTimeoutMs = 3000;
 
     public static readonly IReadOnlyDictionary<string, string> CategoryFolders =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -45,10 +46,15 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
         _client.Config.DataConnectionType = FtpDataConnectionType.AutoPassive;
         _client.Config.SslProtocols = SslProtocols.None;
         _client.Config.ConnectTimeout = 15000;
-        _client.Config.ReadTimeout = 30000;
+        _client.Config.ReadTimeout = 15000;
         _client.Config.DataConnectionConnectTimeout = 15000;
-        _client.Config.DataConnectionReadTimeout = 30000;
+        _client.Config.DataConnectionReadTimeout = 15000;
         _client.Config.RetryAttempts = 2;
+
+        // Namecheap can silently close an idle FTP control connection while the
+        // manager is busy doing HTTP thumbnail work. FluentFTP can test the
+        // control channel before commands and reconnect automatically when needed.
+        _client.Config.NoopTestConnectivity = true;
     }
 
     public string Host { get; }
@@ -120,9 +126,6 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // An inaccessible or malformed directory should not abort discovery.
-                // FluentFTP exception types have changed between major versions, so
-                // keep this boundary version-agnostic and let cancellation propagate.
                 continue;
             }
 
@@ -186,6 +189,7 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
     public async Task<IReadOnlyList<ArchiveItem>> ListCategoryAsync(string category, CancellationToken cancellationToken = default)
     {
         EnsureReady();
+        await EnsureConnectionAliveAsync(cancellationToken);
 
         if (category.Equals("Overview", StringComparison.OrdinalIgnoreCase))
         {
@@ -220,6 +224,8 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
     public async Task UploadFileAsync(string localFilePath, string category, CancellationToken cancellationToken = default)
     {
         EnsureReady();
+        await EnsureConnectionAliveAsync(cancellationToken);
+
         string folderName = GetFolderName(category);
         string remotePath = CombineRemote(MediaRoot!, folderName, Path.GetFileName(localFilePath));
 
@@ -238,7 +244,9 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
     public async Task RenameAsync(ArchiveItem item, string newFileName, CancellationToken cancellationToken = default)
     {
         EnsureReady();
+        await EnsureConnectionAliveAsync(cancellationToken);
         ValidateFileName(newFileName);
+
         string target = CombineRemote(GetRemoteDirectory(item.RemotePath), newFileName);
 
         if (await _client.FileExists(target, cancellationToken))
@@ -252,6 +260,8 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
     public async Task MoveAsync(ArchiveItem item, string targetCategory, CancellationToken cancellationToken = default)
     {
         EnsureReady();
+        await EnsureConnectionAliveAsync(cancellationToken);
+
         string folderName = GetFolderName(targetCategory);
         string target = CombineRemote(MediaRoot!, folderName, item.FileName);
 
@@ -266,6 +276,8 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
     public async Task MoveToTrashAsync(ArchiveItem item, CancellationToken cancellationToken = default)
     {
         EnsureReady();
+        await EnsureConnectionAliveAsync(cancellationToken);
+
         string trashPath = CombineRemote(MediaRoot!, ".Trash");
         if (!await _client.DirectoryExists(trashPath, cancellationToken))
         {
@@ -285,11 +297,16 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
 
     public async Task PermanentlyDeleteAsync(ArchiveItem item, CancellationToken cancellationToken = default)
     {
+        EnsureReady();
+        await EnsureConnectionAliveAsync(cancellationToken);
         await _client.DeleteFile(item.RemotePath, cancellationToken);
     }
 
     public async Task<byte[]> DownloadFileAsync(string remotePath, CancellationToken cancellationToken = default)
     {
+        EnsureReady();
+        await EnsureConnectionAliveAsync(cancellationToken);
+
         using MemoryStream ms = new();
         bool downloaded = await _client.DownloadStream(ms, remotePath, 0, null, cancellationToken);
         if (!downloaded)
@@ -297,6 +314,28 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
             throw new IOException($"FTP download failed for '{Path.GetFileName(remotePath)}'.");
         }
         return ms.ToArray();
+    }
+
+    private async Task EnsureConnectionAliveAsync(CancellationToken cancellationToken)
+    {
+        bool alive = false;
+
+        try
+        {
+            alive = await _client.IsStillConnected(ConnectionHealthTimeoutMs, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            alive = false;
+        }
+
+        if (alive)
+        {
+            return;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        await _client.Connect(cancellationToken);
     }
 
     private async Task<IReadOnlyList<ArchiveItem>> ListItemsFromFolderAsync(
@@ -380,7 +419,7 @@ public sealed class ArchiveFtpClient : IAsyncDisposable
 
     private void EnsureReady()
     {
-        if (string.IsNullOrWhiteSpace(MediaRoot) || !_client.IsConnected)
+        if (string.IsNullOrWhiteSpace(MediaRoot))
         {
             throw new InvalidOperationException("The FTP client has not connected to the archive yet.");
         }
