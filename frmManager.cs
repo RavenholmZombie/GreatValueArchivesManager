@@ -6,13 +6,23 @@ namespace GreatValueArchivesManager
 {
     public partial class frmManager : Form
     {
-        private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
+        private static readonly HttpClient Http = new(new SocketsHttpHandler
+        {
+            MaxConnectionsPerServer = 8,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(10)
+        })
+        {
+            Timeout = TimeSpan.FromSeconds(20)
+        };
 
         private readonly Dictionary<Control, string> _categoryNames = new();
         private readonly ArchiveFtpClient _client;
         private readonly ImageList _thumbnailImages = new();
-        private readonly SemaphoreSlim _thumbnailGate = new(6);
+        private readonly SemaphoreSlim _thumbnailGate = new(4);
         private readonly List<ArchiveItem> _currentItems = [];
+        private readonly Dictionary<string, IReadOnlyList<ArchiveItem>> _categoryCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, ListViewItem> _visibleItemsByPath = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _thumbnailLoadsInProgress = new(StringComparer.OrdinalIgnoreCase);
         private CancellationTokenSource? _loadCts;
         private string _currentCategory = "Overview";
 
@@ -44,7 +54,6 @@ namespace GreatValueArchivesManager
             listViewItems.MultiSelect = true;
             listViewItems.LabelWrap = true;
             listViewItems.ShowItemToolTips = true;
-            listViewItems.TextChanged += (_, _) => { };
             txtSearch.TextChanged += (_, _) => ApplySearchFilter();
             listViewItems.DoubleClick += async (_, _) => await PreviewSelectedAsync();
             listViewItems.KeyDown += async (_, e) =>
@@ -83,7 +92,7 @@ namespace GreatValueArchivesManager
             btnMove.Click += async (_, _) => await MoveSelectedAsync();
             btnRename.Click += async (_, _) => await RenameSelectedAsync();
             btnDelete.Click += async (_, _) => await DeleteSelectedAsync();
-            btnRefresh.Click += async (_, _) => await ReloadCurrentCategoryAsync();
+            btnRefresh.Click += async (_, _) => await ReloadCurrentCategoryAsync(forceRefresh: true);
             btnPreview.Click += async (_, _) => await PreviewSelectedAsync();
         }
 
@@ -91,7 +100,7 @@ namespace GreatValueArchivesManager
         {
             fileToolStripMenuItem.DropDownItems.Clear();
             fileToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Upload...", async () => await UploadAsync(), Keys.Control | Keys.U));
-            fileToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Refresh", async () => await ReloadCurrentCategoryAsync(), Keys.F5));
+            fileToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Refresh", async () => await ReloadCurrentCategoryAsync(forceRefresh: true), Keys.F5));
             fileToolStripMenuItem.DropDownItems.Add(new ToolStripSeparator());
             fileToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Log out", () => { Close(); return Task.CompletedTask; }));
             fileToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Exit", () => { Application.Exit(); return Task.CompletedTask; }));
@@ -114,6 +123,13 @@ namespace GreatValueArchivesManager
             {
                 OpenArchiveViewer();
                 return Task.CompletedTask;
+            }));
+            toolsToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Clear Thumbnail Cache", () =>
+            {
+                ThumbnailCache.Clear();
+                ClearInMemoryThumbnails();
+                MessageBox.Show(this, "The thumbnail cache has been cleared.", "Thumbnail Cache", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return ReloadCurrentCategoryAsync(forceRefresh: true);
             }));
             toolsToolStripMenuItem.DropDownItems.Add(CreateMenuItem("Open Namecheap / cPanel", () =>
             {
@@ -185,18 +201,27 @@ namespace GreatValueArchivesManager
             await ReloadCurrentCategoryAsync();
         }
 
-        private async Task ReloadCurrentCategoryAsync()
+        private async Task ReloadCurrentCategoryAsync(bool forceRefresh = false)
         {
             _loadCts?.Cancel();
             _loadCts?.Dispose();
             _loadCts = new CancellationTokenSource();
             CancellationToken token = _loadCts.Token;
 
-            SetBusy(true, "Loading archive items...");
+            SetBusy(true, forceRefresh ? "Refreshing archive items..." : "Loading archive items...");
             try
             {
-                IReadOnlyList<ArchiveItem> items = await _client.ListCategoryAsync(_currentCategory, token);
-                token.ThrowIfCancellationRequested();
+                IReadOnlyList<ArchiveItem> items;
+                if (!forceRefresh && _categoryCache.TryGetValue(_currentCategory, out IReadOnlyList<ArchiveItem>? cached))
+                {
+                    items = cached;
+                }
+                else
+                {
+                    items = await _client.ListCategoryAsync(_currentCategory, token);
+                    token.ThrowIfCancellationRequested();
+                    CacheCategoryResult(_currentCategory, items);
+                }
 
                 _currentItems.Clear();
                 _currentItems.AddRange(items);
@@ -225,6 +250,28 @@ namespace GreatValueArchivesManager
             }
         }
 
+        private void CacheCategoryResult(string category, IReadOnlyList<ArchiveItem> items)
+        {
+            _categoryCache[category] = items;
+
+            if (category.Equals("Overview", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (IGrouping<string, ArchiveItem> group in items.GroupBy(i => i.Category, StringComparer.OrdinalIgnoreCase))
+                {
+                    _categoryCache[group.Key] = group.OrderBy(i => i.FileName, StringComparer.OrdinalIgnoreCase).ToArray();
+                }
+            }
+            else
+            {
+                _categoryCache.Remove("Overview");
+            }
+        }
+
+        private void InvalidateArchiveCaches()
+        {
+            _categoryCache.Clear();
+        }
+
         private void ApplySearchFilter()
         {
             string filter = txtSearch.Text.Trim();
@@ -236,6 +283,8 @@ namespace GreatValueArchivesManager
             try
             {
                 listViewItems.Items.Clear();
+                _visibleItemsByPath.Clear();
+
                 foreach (ArchiveItem item in filtered)
                 {
                     string imageKey = GetImageKey(item);
@@ -247,6 +296,7 @@ namespace GreatValueArchivesManager
                             : $"{item.FileName}\n{item.Category}"
                     };
                     listViewItems.Items.Add(listItem);
+                    _visibleItemsByPath[item.RemotePath] = listItem;
                 }
             }
             finally
@@ -260,30 +310,44 @@ namespace GreatValueArchivesManager
         private async Task LoadThumbnailAsync(ArchiveItem item, CancellationToken token)
         {
             string key = item.RemotePath;
-            if (_thumbnailImages.Images.ContainsKey(key) || item.PublicUrl is null)
+            if (_thumbnailImages.Images.ContainsKey(key) || item.PublicUrl is null || !_thumbnailLoadsInProgress.Add(key))
             {
                 return;
             }
 
-            await _thumbnailGate.WaitAsync(token);
+            bool gateEntered = false;
+            Bitmap? thumbnail = null;
+
             try
             {
+                await _thumbnailGate.WaitAsync(token);
+                gateEntered = true;
+
                 if (_thumbnailImages.Images.ContainsKey(key))
                 {
                     return;
                 }
 
-                byte[] bytes = await Http.GetByteArrayAsync(item.PublicUrl, token);
-                using Image source = DecodeThumbnailSource(bytes, item.FileName);
-                using Bitmap thumbnail = CreateAspectFitThumbnail(source, _thumbnailImages.ImageSize);
+                thumbnail = await Task.Run(() => ThumbnailCache.TryLoad(key), token);
+
+                if (thumbnail is null)
+                {
+                    byte[] bytes = await Http.GetByteArrayAsync(item.PublicUrl, token);
+                    thumbnail = await Task.Run(() =>
+                    {
+                        using Image source = DecodeThumbnailSource(bytes, item.FileName);
+                        Bitmap rendered = CreateAspectFitThumbnail(source, _thumbnailImages.ImageSize);
+                        ThumbnailCache.Save(key, rendered);
+                        return rendered;
+                    }, token);
+                }
+
+                token.ThrowIfCancellationRequested();
                 _thumbnailImages.Images.Add(key, new Bitmap(thumbnail));
 
-                foreach (ListViewItem visibleItem in listViewItems.Items)
+                if (_visibleItemsByPath.TryGetValue(item.RemotePath, out ListViewItem? visibleItem))
                 {
-                    if (visibleItem.Tag is ArchiveItem archiveItem && archiveItem.RemotePath == item.RemotePath)
-                    {
-                        visibleItem.ImageKey = key;
-                    }
+                    visibleItem.ImageKey = key;
                 }
             }
             catch (OperationCanceledException)
@@ -291,11 +355,16 @@ namespace GreatValueArchivesManager
             }
             catch
             {
-                // The generic image placeholder remains when an individual thumbnail cannot be downloaded.
+                // The generic image placeholder remains when an individual thumbnail cannot be loaded.
             }
             finally
             {
-                _thumbnailGate.Release();
+                thumbnail?.Dispose();
+                if (gateEntered)
+                {
+                    _thumbnailGate.Release();
+                }
+                _thumbnailLoadsInProgress.Remove(key);
             }
         }
 
@@ -342,7 +411,8 @@ namespace GreatValueArchivesManager
                 {
                     await _client.UploadFileAsync(file, targetCategory);
                 }
-                await ReloadCurrentCategoryAsync();
+                InvalidateArchiveCaches();
+                await ReloadCurrentCategoryAsync(forceRefresh: true);
             });
         }
 
@@ -364,7 +434,8 @@ namespace GreatValueArchivesManager
             {
                 SetBusy(true, $"Renaming {item.FileName}...");
                 await _client.RenameAsync(item, newName);
-                await ReloadCurrentCategoryAsync();
+                InvalidateArchiveCaches();
+                await ReloadCurrentCategoryAsync(forceRefresh: true);
             });
         }
 
@@ -390,7 +461,8 @@ namespace GreatValueArchivesManager
                 {
                     await _client.MoveAsync(item, target);
                 }
-                await ReloadCurrentCategoryAsync();
+                InvalidateArchiveCaches();
+                await ReloadCurrentCategoryAsync(forceRefresh: true);
             });
         }
 
@@ -435,7 +507,8 @@ namespace GreatValueArchivesManager
                         await _client.MoveToTrashAsync(item);
                     }
                 }
-                await ReloadCurrentCategoryAsync();
+                InvalidateArchiveCaches();
+                await ReloadCurrentCategoryAsync(forceRefresh: true);
             });
         }
 
@@ -598,6 +671,19 @@ namespace GreatValueArchivesManager
                 return "trash";
             }
             return item.IsVideo ? "video" : "image";
+        }
+
+        private void ClearInMemoryThumbnails()
+        {
+            for (int i = _thumbnailImages.Images.Count - 1; i >= 0; i--)
+            {
+                string key = _thumbnailImages.Images.Keys[i];
+                if (key is not "image" and not "video" and not "trash")
+                {
+                    _thumbnailImages.Images.RemoveAt(i);
+                }
+            }
+            ApplySearchFilter();
         }
 
         private void OpenArchiveViewer()
